@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App Identity -->
+    <string name="app_name">PayloadPack</string>
+    <string name="app_subtitle">Pembuka / Pemaket ROM</string>
+    <string name="app_tagline">Ekstrak dan paket ulang image ROM Android dengan mudah</string>
+
+    <!-- Navigation & Actions -->
+    <string name="action_select_file">Pilih File</string>
+    <string name="action_pick_file">Pilih File</string>
+    <string name="action_unpack">Ekstrak</string>
+    <string name="action_repack">Paket Ulang</string>
+    <string name="action_settings">Pengaturan</string>
+    <string name="action_cancel">Batal</string>
+    <string name="action_retry">Coba Lagi</string>
+    <string name="action_close">Tutup</string>
+    <string name="action_continue">Lanjutkan</string>
+    <string name="action_extract_all">Ekstrak Semua</string>
+    <string name="action_extract_selected">Ekstrak Terpilih</string>
+
+    <!-- Root & Initialization -->
+    <string name="init_checking">Memeriksa lingkungan…</string>
+    <string name="init_requesting_root">Meminta Akses Root</string>
+    <string name="init_requesting_root_desc">Mohon berikan izin root pada popup</string>
+    <string name="init_root_denied">Akses Root Ditolak</string>
+    <string name="init_root_denied_desc">Aplikasi ini membutuhkan akses root untuk berfungsi.\nDiperlukan untuk mengakses /data guna menyimpan atribut file Linux.</string>
+    <string name="init_workspace">Menginisialisasi Ruang Kerja</string>
+    <string name="init_workspace_desc">Membuat direktori…</string>
+    <string name="init_ready">Siap!</string>
+    <string name="init_ready_desc">Ruang kerja berhasil diinisialisasi</string>
+    <string name="init_error">Inisialisasi Gagal</string>
+    <string name="please_wait">Mohon tunggu</string>
+
+    <!-- Storage Labels -->
+    <string name="storage_user">Penyimpanan Pengguna</string>
+    <string name="storage_user_desc">File masukan/keluaran</string>
+    <string name="storage_work">Penyimpanan Kerja</string>
+    <string name="storage_work_desc">Atribut Linux lengkap (symlink, izin)</string>
+    <string name="storage_locations">Lokasi Penyimpanan</string>
+
+    <!-- Status Messages -->
+    <string name="status_idle">Menunggu</string>
+    <string name="status_analyzing">Menganalisis…</string>
+    <string name="status_processing">Memproses…</string>
+    <string name="status_extracting">Mengekstrak…</string>
+    <string name="status_repacking">Memaket ulang…</string>
+    <string name="status_done">Selesai</string>
+    <string name="status_error">Kesalahan</string>
+    <string name="status_ready">Sistem Siap</string>
+
+    <!-- Empty State -->
+    <string name="empty_title">Belum Ada Payload</string>
+    <string name="empty_description">Pilih file payload.bin dari penyimpanan Anda untuk mulai mengekstrak partisi</string>
+    <string name="empty_hint">Didukung: File OTA payload.bin</string>
+
+    <!-- Payload Information -->
+    <string name="payload_info">Informasi Payload</string>
+    <string name="payload_version">Versi</string>
+    <string name="payload_block_size">Ukuran Blok</string>
+    <string name="payload_partitions">Partisi</string>
+    <string name="payload_total_size">Ukuran Total</string>
+    <string name="payload_partial">Pembaruan Parsial</string>
+    <string name="payload_security_patch">Patch Keamanan</string>
+
+    <!-- Partition Info -->
+    <string name="partition_size">Ukuran: %1$s</string>
+    <string name="partition_hash">Hash: %1$s</string>
+    <string name="partition_operations">%1$d operasi</string>
+    <string name="partition_count">%1$d partisi</string>
+
+    <!-- Partition Attributes -->
+    <string name="attr_erofs">EROFS</string>
+    <string name="attr_ext4">EXT4</string>
+    <string name="attr_readonly">Hanya-Baca</string>
+    <string name="attr_sparse">Sparse</string>
+    <string name="attr_compressed">Terkompresi</string>
+
+    <!-- System Info -->
+    <string name="native_engine">Mesin Native</string>
+    <string name="work_storage_available">Penyimpanan Kerja: %1$s tersedia</string>
+
+    <!-- Errors -->
+    <string name="error_file_not_found">File tidak ditemukan</string>
+    <string name="error_invalid_payload">Format payload tidak valid</string>
+    <string name="error_parse_failed">Gagal mengurai payload</string>
+    <string name="error_permission_denied">Izin ditolak</string>
+    <string name="error_disk_full">Ruang disk tidak cukup</string>
+    <string name="error_unknown">Terjadi kesalahan yang tidak diketahui</string>
+
+    <!-- Confirmation -->
+    <string name="confirm_extract_title">Ekstrak Partisi?</string>
+    <string name="confirm_extract_message">Ini akan mengekstrak %1$d partisi ke direktori kerja.</string>
+
+    <!-- Coming Soon -->
+    <string name="coming_soon">Segera</string>
+    <string name="feature_extractor">Pengekstrak Payload</string>
+    <string name="feature_extractor_desc">Ekstrak payload.bin dari paket OTA</string>
+    <string name="feature_unpacker">Pembuka Image</string>
+    <string name="feature_unpacker_desc">Buka image system, vendor, product</string>
+    <string name="feature_repacker">Pemaket Image</string>
+    <string name="feature_repacker_desc">Paket ulang image yang dimodifikasi ke format yang dapat di-flash</string>
+
+    <!-- Accessibility -->
+    <string name="cd_partition_icon">Ikon partisi</string>
+    <string name="cd_status_icon">Ikon status</string>
+    <string name="cd_close">Tutup</string>
+    <string name="cd_menu">Menu</string>
+</resources>
