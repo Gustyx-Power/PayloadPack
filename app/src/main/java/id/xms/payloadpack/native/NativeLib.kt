@@ -97,4 +97,36 @@ object NativeLib {
      */
     @JvmStatic
     external fun inspectPayload(path: String): String?
+
+    /**
+     * Extract partition images from a payload.bin file.
+     *
+     * This function extracts all partitions from the payload and writes them as .img files
+     * to the specified output directory. Uses streaming I/O to handle large files efficiently.
+     *
+     * @param payloadPath Path to the payload.bin file
+     * @param outputDir Directory where .img files will be written (created if doesn't exist)
+     * @return JSON string with extraction result
+     *
+     * Example success response:
+     * ```json
+     * {
+     *   "status": "success",
+     *   "extracted": [
+     *     {"name": "system", "size": 2147483648, "path": "/data/PayloadPack/project/system.img"},
+     *     {"name": "vendor", "size": 536870912, "path": "/data/PayloadPack/project/vendor.img"}
+     *   ]
+     * }
+     * ```
+     *
+     * Example error response:
+     * ```json
+     * {
+     *   "status": "error",
+     *   "message": "Failed to write partition: Permission denied"
+     * }
+     * ```
+     */
+    @JvmStatic
+    external fun extractPayload(payloadPath: String, outputDir: String): String?
 }
