@@ -23,6 +23,7 @@ import id.xms.payloadpack.native.NativeLib
 import id.xms.payloadpack.ui.screens.HomeScreen
 import id.xms.payloadpack.ui.screens.RootInitScreen
 import id.xms.payloadpack.ui.screens.StoragePermissionScreen
+import id.xms.payloadpack.ui.screens.WorkspaceScreen
 import id.xms.payloadpack.ui.theme.PayloadPackTheme
 import kotlinx.coroutines.launch
 
@@ -34,6 +35,14 @@ enum class AppState {
     NEED_STORAGE_PERMISSION,
     NEED_ROOT,
     READY
+}
+
+/**
+ * Navigation state
+ */
+sealed class NavigationState {
+    data object Home : NavigationState()
+    data class Workspace(val projectPath: String) : NavigationState()
 }
 
 class MainActivity : ComponentActivity() {
@@ -126,7 +135,28 @@ class MainActivity : ComponentActivity() {
                             }
                             
                             AppState.READY -> {
-                                HomeScreen()
+                                // Navigation state management
+                                var navigationState by remember {
+                                    mutableStateOf<NavigationState>(NavigationState.Home)
+                                }
+
+                                when (val navState = navigationState) {
+                                    is NavigationState.Home -> {
+                                        HomeScreen(
+                                            onNavigateToWorkspace = { projectPath ->
+                                                navigationState = NavigationState.Workspace(projectPath)
+                                            }
+                                        )
+                                    }
+                                    is NavigationState.Workspace -> {
+                                        WorkspaceScreen(
+                                            projectPath = navState.projectPath,
+                                            onBack = {
+                                                navigationState = NavigationState.Home
+                                            }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

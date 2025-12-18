@@ -32,7 +32,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Refresh
@@ -40,7 +39,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderZip
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Source
 import androidx.compose.material3.AlertDialog
@@ -57,7 +55,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -101,10 +98,12 @@ private data class TabItem(
  * Main home screen with tabbed workspace interface.
  * Tab 1: Sources - ROMs to unpack
  * Tab 2: Projects - Extracted ROMs
+ * @param onNavigateToWorkspace Callback to navigate to workspace screen with project path
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
+    onNavigateToWorkspace: (String) -> Unit = {},
     viewModel: HomeViewModel = viewModel(),
     modifier: Modifier = Modifier
 ) {
@@ -248,8 +247,8 @@ fun HomeScreen(
                         onRefresh = { viewModel.refreshProjects() },
                         onOpen = { project ->
                             triggerHaptic()
-                            // TODO: Navigate to detail screen
-                            Log.d(TAG, "Open project: ${project.name}")
+                            Log.d(TAG, "Open project: ${project.name} at ${project.path}")
+                            onNavigateToWorkspace(project.path)
                         },
                         onDelete = { project ->
                             viewModel.showDeleteDialog(project)

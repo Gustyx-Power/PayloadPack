@@ -155,7 +155,7 @@ class FileRepository {
     /**
      * Create project info from a folder.
      */
-    private fun getProjectFromFolder(folder: File): Project {
+    private suspend fun getProjectFromFolder(folder: File): Project {
         val name = folder.name
         val path = folder.absolutePath
         
@@ -163,16 +163,20 @@ class FileRepository {
         val payloadFile = File(folder, "payload.bin")
         val hasPayload = payloadFile.exists()
         
-        // Count .img files (extracted partitions)
-        val partitionCount = folder.walk()
-            .filter { it.isFile && it.extension.lowercase() == "img" }
-            .count()
-        
-        // Calculate total size
-        val totalSize = folder.walk()
-            .filter { it.isFile }
-            .sumOf { it.length() }
-        
+        // Count .img files (extracted partitions) - try File API first
+        val partitionCount = try {
+            folder.walk()
+                .filter { it.isFile && it.extension.lowercase() == "img" }
+                .count()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to count partitions via File API: ${e.message}")
+            // Fallback to root shell count
+            countPartitionsWithRoot(path)
+        }
+
+        // Calculate total size using Root shell (File.length() often returns 0 in /data)
+        val totalSize = id.xms.payloadpack.core.RootSizeCalculator.calculateSize(path)
+
         // Get last modified
         val lastModified = folder.lastModified()
         
@@ -182,10 +186,21 @@ class FileRepository {
             hasPayload = hasPayload,
             partitionCount = partitionCount,
             totalSize = totalSize,
-            sizeHuman = StorageHelper.formatSize(totalSize),
+            sizeHuman = id.xms.payloadpack.core.RootSizeCalculator.formatSize(totalSize),
             lastModified = lastModified,
             lastModifiedFormatted = dateFormatter.format(Date(lastModified))
         )
+    }
+
+    /**
+     * Count .img files using root shell as fallback.
+     */
+    private fun countPartitionsWithRoot(path: String): Int {
+        val result = Shell.cmd("find '$path' -type f -name '*.img' 2>/dev/null | wc -l").exec()
+        if (!result.isSuccess || result.out.isEmpty()) {
+            return 0
+        }
+        return result.out.firstOrNull()?.trim()?.toIntOrNull() ?: 0
     }
 
     /**
