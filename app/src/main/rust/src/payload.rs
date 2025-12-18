@@ -604,12 +604,16 @@ pub struct ExtractionResult {
 /// # Arguments
 /// * `payload_path` - Path to the payload.bin file
 /// * `output_dir` - Directory where .img files will be written
+/// * `progress_callback` - Optional callback for progress updates (file, progress%, bytes_processed, total_bytes)
 ///
 /// # Returns
 /// * `Ok(ExtractionResult)` - List of extracted partitions
 /// * `Err(PayloadError)` - If extraction fails
-pub fn extract_payload(payload_path: &str, output_dir: &str) -> Result<ExtractionResult, PayloadError> {
-    use std::io::{BufReader, BufWriter, Write};
+pub fn extract_payload<F>(payload_path: &str, output_dir: &str, mut progress_callback: Option<F>) -> Result<ExtractionResult, PayloadError>
+where
+    F: FnMut(&str, i32, i64, i64) + Send,
+{
+    use std::io::{BufWriter, Write};
 
     log::info!("=== PAYLOAD EXTRACTION START ===");
     log::info!("Payload: {}", payload_path);
@@ -650,10 +654,27 @@ pub fn extract_payload(payload_path: &str, output_dir: &str) -> Result<Extractio
 
     let mut extracted = Vec::new();
 
+    // Calculate total bytes for progress tracking
+    let total_bytes: u64 = manifest.partitions.iter()
+        .filter_map(|p| p.new_partition_info.as_ref().and_then(|info| info.size))
+        .sum();
+
+    let mut bytes_processed: u64 = 0;
+
     // Extract each partition
-    for partition in &manifest.partitions {
+    for (_partition_idx, partition) in manifest.partitions.iter().enumerate() {
         let partition_name = &partition.partition_name;
         log::info!("Extracting partition: {}", partition_name);
+
+        // Report progress at start of partition
+        if let Some(ref mut callback) = progress_callback {
+            let progress_percent = if total_bytes > 0 {
+                ((bytes_processed as f64 / total_bytes as f64) * 100.0) as i32
+            } else {
+                0
+            };
+            callback(partition_name, progress_percent, bytes_processed as i64, total_bytes as i64);
+        }
 
         let output_file_path = output_path.join(format!("{}.img", partition_name));
         log::info!("  Output: {}", output_file_path.display());
@@ -726,6 +747,19 @@ pub fn extract_payload(payload_path: &str, output_dir: &str) -> Result<Extractio
 
         log::info!("  ✓ Extracted: {} bytes", final_size);
 
+        // Update bytes processed
+        bytes_processed += partition_size;
+
+        // Report progress after partition completion
+        if let Some(ref mut callback) = progress_callback {
+            let progress_percent = if total_bytes > 0 {
+                ((bytes_processed as f64 / total_bytes as f64) * 100.0) as i32
+            } else {
+                100
+            };
+            callback(partition_name, progress_percent, bytes_processed as i64, total_bytes as i64);
+        }
+
         extracted.push(ExtractedPartition {
             name: partition_name.clone(),
             size: final_size,
@@ -771,10 +805,17 @@ fn decompress_bz2(data: &[u8]) -> Result<Vec<u8>, PayloadError> {
 }
 
 /// Extract payload and return JSON result
-pub fn extract_payload_json(payload_path: &str, output_dir: &str) -> Result<String, String> {
+pub fn extract_payload_json<F>(
+    payload_path: &str,
+    output_dir: &str,
+    progress_callback: Option<F>
+) -> Result<String, String>
+where
+    F: FnMut(&str, i32, i64, i64) + Send,
+{
     log::info!("extract_payload_json called");
 
-    match extract_payload(payload_path, output_dir) {
+    match extract_payload(payload_path, output_dir, progress_callback) {
         Ok(result) => {
             match serde_json::to_string(&result) {
                 Ok(json) => Ok(json),
