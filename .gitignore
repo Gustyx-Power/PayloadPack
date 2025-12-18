@@ -13,3 +13,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Rust/Cargo build artifacts
+**/target/
+**/*.rs.bk
+Cargo.lock
