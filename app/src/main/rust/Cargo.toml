@@ -1,0 +1,28 @@
+[package]
+name = "payloadpack"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# Required for Android JNI - produces a .so file
+crate-type = ["cdylib"]
+name = "payloadpack"
+
+[dependencies]
+# JNI bindings for Rust
+jni = { version = "0.21", features = ["invocation"] }
+
+# Error handling with thiserror
+thiserror = "1.0"
+
+# Logging (optional but useful for debugging)
+log = "0.4"
+android_logger = "0.14"
+
+[profile.release]
+# Optimize for size (important for Android)
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
