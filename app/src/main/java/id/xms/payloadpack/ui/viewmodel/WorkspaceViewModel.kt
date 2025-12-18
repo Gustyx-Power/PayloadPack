@@ -38,7 +38,12 @@ data class WorkspaceUiState(
     val payloadSizeFormatted: String = "0 B",
     val unpackState: UnpackState = UnpackState.Idle,
     val partitions: List<PartitionInfo> = emptyList(),
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    // Progress tracking
+    val extractionProgress: Float = 0f,
+    val currentFile: String = "",
+    val bytesProcessed: Long = 0L,
+    val totalBytes: Long = 0L
 )
 
 /**
@@ -158,11 +163,31 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                     Log.w(TAG, "SELinux/chmod warning: ${selinuxResult.err}")
                 }
 
-                // Call Rust native extractor
+                // Call Rust native extractor with progress callback
                 val payloadPath = _uiState.value.payloadPath!!
                 Log.d(TAG, "Calling Rust extractor: $payloadPath -> $projectPath")
 
-                val resultJson = NativeLib.extractPayload(payloadPath, projectPath)
+                // Create progress listener
+                val progressListener = object : id.xms.payloadpack.native.ProgressListener {
+                    override fun onProgress(
+                        currentFile: String,
+                        progress: Int,
+                        bytesProcessed: Long,
+                        totalBytes: Long
+                    ) {
+                        // Update UI on main thread
+                        viewModelScope.launch(Dispatchers.Main) {
+                            _uiState.value = _uiState.value.copy(
+                                extractionProgress = progress / 100f,
+                                currentFile = currentFile,
+                                bytesProcessed = bytesProcessed,
+                                totalBytes = totalBytes
+                            )
+                        }
+                    }
+                }
+
+                val resultJson = NativeLib.extractPayload(payloadPath, projectPath, progressListener)
 
                 if (resultJson == null) {
                     withContext(Dispatchers.Main) {

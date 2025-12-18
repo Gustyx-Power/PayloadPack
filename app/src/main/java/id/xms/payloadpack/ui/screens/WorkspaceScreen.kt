@@ -1,5 +1,6 @@
 package id.xms.payloadpack.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -83,6 +84,13 @@ fun WorkspaceScreen(
     )
 
     val uiState by viewModel.uiState.collectAsState()
+
+    // Handle back button press
+    BackHandler(enabled = true) {
+        // If extraction is in progress, maybe show confirmation dialog
+        // For now, just navigate back (extraction continues in background)
+        onBack()
+    }
 
     Scaffold(
         topBar = {
@@ -332,9 +340,14 @@ private fun WorkspaceContent(
             }
 
             is id.xms.payloadpack.ui.viewmodel.UnpackState.Loading -> {
-                // Show Loading State
+                // Show Loading State with real-time progress
                 item {
-                    LoadingUnpackCard()
+                    LoadingUnpackCard(
+                        progress = uiState.extractionProgress,
+                        currentFile = uiState.currentFile,
+                        bytesProcessed = uiState.bytesProcessed,
+                        totalBytes = uiState.totalBytes
+                    )
                 }
             }
 
@@ -390,6 +403,10 @@ private fun WorkspaceContent(
 
 @Composable
 private fun LoadingUnpackCard(
+    progress: Float,
+    currentFile: String,
+    bytesProcessed: Long,
+    totalBytes: Long,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -402,25 +419,71 @@ private fun LoadingUnpackCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(24.dp)
         ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(56.dp),
-                strokeWidth = 4.dp
-            )
-            Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "Extracting Partitions...",
+                text = "Extracting Partitions",
                 style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
             )
+
             Spacer(modifier = Modifier.height(8.dp))
+
+            // Progress percentage
             Text(
-                text = "This may take several minutes",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                text = "${(progress * 100).toInt()}%",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Linear progress bar
+            androidx.compose.material3.LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(12.dp)
+                    .clip(RoundedCornerShape(6.dp)),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Current file being processed
+            if (currentFile.isNotEmpty()) {
+                Text(
+                    text = "Processing: $currentFile",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+
+            // Bytes processed
+            if (totalBytes > 0) {
+                val processedFormatted = id.xms.payloadpack.core.RootSizeCalculator.formatSize(bytesProcessed)
+                val totalFormatted = id.xms.payloadpack.core.RootSizeCalculator.formatSize(totalBytes)
+
+                Text(
+                    text = "$processedFormatted / $totalFormatted",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                )
+            } else {
+                Text(
+                    text = "Initializing extraction...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                )
+            }
         }
     }
 }
