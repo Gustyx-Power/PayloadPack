@@ -40,9 +40,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import id.xms.payloadpack.R
 import id.xms.payloadpack.core.DirectoryManager
 import kotlinx.coroutines.launch
 
@@ -114,7 +117,7 @@ fun RootInitScreen(
                 brush = Brush.verticalGradient(
                     colors = listOf(
                         MaterialTheme.colorScheme.surface,
-                        MaterialTheme.colorScheme.surfaceVariant
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     )
                 )
             ),
@@ -127,14 +130,14 @@ fun RootInitScreen(
         ) {
             // App Title
             Text(
-                text = "PayloadPack",
+                text = stringResource(R.string.app_name),
                 style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
             )
 
             Text(
-                text = "ROM Unpacker / Repacker",
+                text = stringResource(R.string.app_subtitle),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -177,7 +180,7 @@ private fun InitStatusCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp)),
+            .clip(RoundedCornerShape(24.dp)),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
         ),
@@ -195,8 +198,8 @@ private fun InitStatusCard(
                     StatusRow(
                         icon = null,
                         isLoading = true,
-                        title = "Checking environment...",
-                        subtitle = "Please wait"
+                        title = stringResource(R.string.init_checking),
+                        subtitle = stringResource(R.string.please_wait)
                     )
                 }
 
@@ -204,8 +207,8 @@ private fun InitStatusCard(
                     StatusRow(
                         icon = null,
                         isLoading = true,
-                        title = "Requesting Root Access",
-                        subtitle = "Please grant root permission in the popup"
+                        title = stringResource(R.string.init_requesting_root),
+                        subtitle = stringResource(R.string.init_requesting_root_desc)
                     )
                 }
 
@@ -214,9 +217,8 @@ private fun InitStatusCard(
                         icon = Icons.Default.Close,
                         iconColor = MaterialTheme.colorScheme.error,
                         isLoading = false,
-                        title = "Root Access Denied",
-                        subtitle = "This app requires root access to function properly.\n" +
-                                "It needs to access /data for preserving Linux file attributes."
+                        title = stringResource(R.string.init_root_denied),
+                        subtitle = stringResource(R.string.init_root_denied_desc)
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -233,7 +235,7 @@ private fun InitStatusCard(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Retry")
+                        Text(stringResource(R.string.action_retry))
                     }
                 }
 
@@ -241,8 +243,8 @@ private fun InitStatusCard(
                     StatusRow(
                         icon = null,
                         isLoading = true,
-                        title = "Initializing Workspace",
-                        subtitle = "Creating directories..."
+                        title = stringResource(R.string.init_workspace),
+                        subtitle = stringResource(R.string.init_workspace_desc)
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -259,8 +261,8 @@ private fun InitStatusCard(
                         icon = Icons.Default.Check,
                         iconColor = Color(0xFF4CAF50),
                         isLoading = false,
-                        title = "Ready!",
-                        subtitle = "Workspace initialized successfully"
+                        title = stringResource(R.string.init_ready),
+                        subtitle = stringResource(R.string.init_ready_desc)
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -276,7 +278,7 @@ private fun InitStatusCard(
                         icon = Icons.Default.Warning,
                         iconColor = MaterialTheme.colorScheme.error,
                         isLoading = false,
-                        title = "Initialization Failed",
+                        title = stringResource(R.string.init_error),
                         subtitle = state.message
                     )
 
@@ -294,7 +296,7 @@ private fun InitStatusCard(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Retry")
+                        Text(stringResource(R.string.action_retry))
                     }
                 }
             }
@@ -326,13 +328,14 @@ private fun StatusRow(
                 if (loading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(48.dp),
-                        strokeWidth = 4.dp
+                        strokeWidth = 4.dp,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 } else {
                     icon?.let {
                         Icon(
                             imageVector = it,
-                            contentDescription = null,
+                            contentDescription = stringResource(R.string.cd_status_icon),
                             modifier = Modifier.size(48.dp),
                             tint = iconColor
                         )
@@ -347,7 +350,8 @@ private fun StatusRow(
             text = title,
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurface
         )
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -370,22 +374,22 @@ private fun DirectoryInfo(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .padding(16.dp)
     ) {
         DirectoryRow(
-            label = "User Storage",
+            label = stringResource(R.string.storage_user),
             path = userDir,
-            description = "Input/Output files"
+            description = stringResource(R.string.storage_user_desc)
         )
 
         Spacer(modifier = Modifier.height(12.dp))
 
         DirectoryRow(
-            label = "Work Storage",
+            label = stringResource(R.string.storage_work),
             path = workDir,
-            description = "Full Linux attributes (symlinks, permissions)"
+            description = stringResource(R.string.storage_work_desc)
         )
     }
 }
@@ -422,7 +426,7 @@ private fun DirectoryRow(
         Text(
             text = path,
             style = MaterialTheme.typography.bodySmall,
-            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurface
         )
     }
