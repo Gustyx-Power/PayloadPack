@@ -141,10 +141,9 @@ private fun parsePayloadJson(jsonString: String): Result<PayloadData> {
             return Result.failure(Exception(json.getString("error")))
         }
         
-        // Parse header
+        // Parse header - version is now a single u64, not major.minor
         val header = json.getJSONObject("header")
-        val versionMajor = header.getInt("version_major")
-        val versionMinor = header.getInt("version_minor")
+        val version = header.getLong("version")
         
         // Parse partitions
         val partitionsArray = json.getJSONArray("partitions")
@@ -164,7 +163,7 @@ private fun parsePayloadJson(jsonString: String): Result<PayloadData> {
         
         Result.success(
             PayloadData(
-                version = "$versionMajor.$versionMinor",
+                version = "v$version", // Now just "v2" instead of "2.0"
                 blockSize = json.getInt("block_size"),
                 partialUpdate = json.getBoolean("partial_update"),
                 securityPatch = json.optString("security_patch_level").takeIf { it.isNotEmpty() },
