@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.topjohnwu.superuser.Shell
+import id.xms.payloadpack.core.PermissionManager
 import id.xms.payloadpack.core.RootSizeCalculator
 import id.xms.payloadpack.native.NativeLib
 import kotlinx.coroutines.Dispatchers
@@ -56,7 +57,8 @@ data class PartitionInfo(
     val sizeFormatted: String,
     val isExtracted: Boolean = false,
     val extractedPath: String? = null,
-    val isExtracting: Boolean = false
+    val isExtracting: Boolean = false,
+    val hasPermissionConfig: Boolean = false  // True if fs_config exists for this partition
 )
 
 /**
@@ -252,6 +254,10 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
     /**
      * Load extracted partitions from the project directory.
      * This is called after successful extraction to refresh the UI.
+     * 
+     * IMPORTANT: If .img files are found, this also updates unpackState to Success
+     * so that returning to a project shows the extracted partitions instead of
+     * the "Start Unpack" button.
      */
     private suspend fun loadExtractedPartitions() {
         withContext(Dispatchers.IO) {
@@ -272,8 +278,15 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                     // Check if partition is already extracted
                     val extractedFolder = File(projectDir, "${partitionName}_extracted")
                     val isExtracted = extractedFolder.exists() && extractedFolder.isDirectory
+                    
+                    // Check if fs_config exists (permissions preserved)
+                    val hasPermConfig = if (isExtracted) {
+                        PermissionManager.hasPermissionConfig(extractedFolder)
+                    } else {
+                        false
+                    }
 
-                    Log.d(TAG, "  ${file.name}: $size bytes (extracted: $isExtracted)")
+                    Log.d(TAG, "  ${file.name}: $size bytes (extracted: $isExtracted, permConfig: $hasPermConfig)")
 
                     PartitionInfo(
                         name = partitionName,
@@ -281,12 +294,23 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                         size = size,
                         sizeFormatted = RootSizeCalculator.formatSize(size),
                         isExtracted = isExtracted,
-                        extractedPath = if (isExtracted) extractedFolder.absolutePath else null
+                        extractedPath = if (isExtracted) extractedFolder.absolutePath else null,
+                        hasPermissionConfig = hasPermConfig
                     )
                 }.sortedBy { it.name }
 
                 withContext(Dispatchers.Main) {
+                    // Update partitions list
                     _uiState.value = _uiState.value.copy(partitions = partitions)
+                    
+                    // CRITICAL FIX: If we have .img files, set unpackState to Success
+                    // This ensures re-opening a project shows partitions instead of "Start Unpack"
+                    if (partitions.isNotEmpty() && _uiState.value.unpackState is UnpackState.Idle) {
+                        Log.d(TAG, "Found ${partitions.size} existing partitions, updating state to Success")
+                        _uiState.value = _uiState.value.copy(
+                            unpackState = UnpackState.Success(extractedCount = partitions.size)
+                        )
+                    }
                 }
 
             } catch (e: Exception) {
@@ -574,6 +598,7 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
     /**
      * Extract EROFS image using erofs-utils binaries.
      * Tries extract.erofs first, then fsck.erofs --extract.
+     * Preserves original permissions to fs_config before applying chmod 777.
      */
     private suspend fun extractErofsImage(imgFile: File, outputFolder: File): Boolean {
         val binPath = id.xms.payloadpack.core.BinaryManager.getBinPath()
@@ -581,6 +606,8 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
             Log.e(TAG, "BinaryManager not initialized")
             return false
         }
+        
+        val partitionName = imgFile.nameWithoutExtension
         
         // Method 1: Try extract.erofs (preferred for extraction)
         if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("extract.erofs")) {
@@ -592,6 +619,19 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
             ).exec()
             
             if (result.isSuccess) {
+                // Save original permissions BEFORE chmod 777
+                Log.d(TAG, "Saving original permissions...")
+                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                when (saveResult) {
+                    is PermissionManager.SaveResult.Success -> {
+                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
+                    }
+                    is PermissionManager.SaveResult.Error -> {
+                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
+                    }
+                }
+                
+                // Now apply chmod 777 for UI access
                 Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
                 Log.d(TAG, "extract.erofs successful")
                 result.out.forEach { Log.d(TAG, "  $it") }
@@ -611,6 +651,19 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
             ).exec()
             
             if (result.isSuccess) {
+                // Save original permissions BEFORE chmod 777
+                Log.d(TAG, "Saving original permissions...")
+                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                when (saveResult) {
+                    is PermissionManager.SaveResult.Success -> {
+                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
+                    }
+                    is PermissionManager.SaveResult.Error -> {
+                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
+                    }
+                }
+                
+                // Now apply chmod 777 for UI access
                 Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
                 Log.d(TAG, "fsck.erofs extraction successful")
                 result.out.forEach { Log.d(TAG, "  $it") }
@@ -651,8 +704,9 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
     /**
      * Extract EXT4 image using mount or simg2img.
+     * Preserves original permissions to fs_config before applying chmod 777.
      */
-    private fun extractExt4Image(imgFile: File, outputFolder: File): Boolean {
+    private suspend fun extractExt4Image(imgFile: File, outputFolder: File): Boolean {
         return try {
             val success = id.xms.payloadpack.core.BinaryManager.extractExt4(
                 imgFile.absolutePath,
@@ -660,6 +714,21 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
             )
 
             if (success) {
+                val partitionName = imgFile.nameWithoutExtension
+                
+                // Save original permissions BEFORE chmod 777
+                Log.d(TAG, "Saving original permissions for $partitionName...")
+                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                when (saveResult) {
+                    is PermissionManager.SaveResult.Success -> {
+                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
+                    }
+                    is PermissionManager.SaveResult.Error -> {
+                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
+                    }
+                }
+                
+                // Now apply chmod 777 for UI access
                 Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
                 id.xms.payloadpack.core.BinaryManager.cleanup(outputFolder.absolutePath)
                 Log.d(TAG, "EXT4 extraction successful")
@@ -676,8 +745,9 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
     /**
      * Extract boot image using unpack_bootimg binary.
+     * Preserves original permissions to fs_config before applying chmod 777.
      */
-    private fun extractBootImage(imgFile: File, outputFolder: File): Boolean {
+    private suspend fun extractBootImage(imgFile: File, outputFolder: File): Boolean {
         return try {
             val success = id.xms.payloadpack.core.BinaryManager.unpackBootImage(
                 imgFile.absolutePath,
@@ -685,6 +755,21 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
             )
 
             if (success) {
+                val partitionName = imgFile.nameWithoutExtension
+                
+                // Save original permissions BEFORE chmod 777
+                Log.d(TAG, "Saving original permissions for $partitionName...")
+                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                when (saveResult) {
+                    is PermissionManager.SaveResult.Success -> {
+                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
+                    }
+                    is PermissionManager.SaveResult.Error -> {
+                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
+                    }
+                }
+                
+                // Now apply chmod 777 for UI access
                 Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
                 Log.d(TAG, "Boot image unpacking successful")
             } else {
@@ -700,10 +785,12 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
     /**
      * Extract F2FS image using mount.
+     * Preserves original permissions to fs_config before applying chmod 777.
      */
-    private fun extractF2fsImage(imgFile: File, outputFolder: File): Boolean {
+    private suspend fun extractF2fsImage(imgFile: File, outputFolder: File): Boolean {
         return try {
             val mountPoint = "/mnt/payload_f2fs_tmp"
+            val partitionName = imgFile.nameWithoutExtension
 
             val mountResult = Shell.cmd(
                 "mkdir -p '$mountPoint'",
@@ -715,14 +802,28 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                 return false
             }
 
+            // Copy files first (preserving permissions with -p flag)
             val copyResult = Shell.cmd(
-                "cp -r '$mountPoint'/* '${outputFolder.absolutePath}'/",
-                "chmod -R 777 '${outputFolder.absolutePath}'"
+                "cp -rpf '$mountPoint'/. '${outputFolder.absolutePath}/'"
             ).exec()
 
             Shell.cmd("umount '$mountPoint'").exec()
 
             if (copyResult.isSuccess) {
+                // Save original permissions BEFORE chmod 777
+                Log.d(TAG, "Saving original permissions for $partitionName...")
+                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                when (saveResult) {
+                    is PermissionManager.SaveResult.Success -> {
+                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
+                    }
+                    is PermissionManager.SaveResult.Error -> {
+                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
+                    }
+                }
+                
+                // Now apply chmod 777 for UI access
+                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
                 Log.d(TAG, "F2FS extraction successful")
                 true
             } else {
@@ -787,6 +888,97 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
      */
     fun retry() {
         checkPayload()
+    }
+
+    /**
+     * Restore original file permissions for a partition.
+     * This should be called before repacking to restore original permissions from fs_config.
+     *
+     * @param partition The partition to restore permissions for
+     */
+    fun restorePartitionPermissions(partition: PartitionInfo) {
+        if (!partition.isExtracted || partition.extractedPath == null) {
+            Log.w(TAG, "Cannot restore permissions: partition not extracted")
+            return
+        }
+
+        if (!partition.hasPermissionConfig) {
+            Log.w(TAG, "Cannot restore permissions: no fs_config found")
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Log.d(TAG, "Restoring permissions for: ${partition.name}")
+                
+                val extractedFolder = File(partition.extractedPath)
+                val result = PermissionManager.restorePermissions(extractedFolder)
+                
+                when (result) {
+                    is PermissionManager.RestoreResult.Success -> {
+                        Log.d(TAG, "Permissions restored: ${result.restoredCount} files")
+                        withContext(Dispatchers.Main) {
+                            _uiState.value = _uiState.value.copy(
+                                errorMessage = null
+                            )
+                        }
+                    }
+                    is PermissionManager.RestoreResult.Error -> {
+                        Log.e(TAG, "Failed to restore permissions: ${result.message}")
+                        withContext(Dispatchers.Main) {
+                            _uiState.value = _uiState.value.copy(
+                                errorMessage = "Failed to restore permissions: ${result.message}"
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error restoring permissions: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Error: ${e.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Restore permissions for all extracted partitions.
+     * This should be called before assembling the ROM.
+     */
+    fun restoreAllPermissions() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Log.d(TAG, "Restoring permissions for all extracted partitions...")
+                
+                var totalRestored = 0
+                var failures = 0
+                
+                for (partition in _uiState.value.partitions) {
+                    if (partition.isExtracted && partition.hasPermissionConfig && partition.extractedPath != null) {
+                        val extractedFolder = File(partition.extractedPath)
+                        val result = PermissionManager.restorePermissions(extractedFolder)
+                        
+                        when (result) {
+                            is PermissionManager.RestoreResult.Success -> {
+                                totalRestored += result.restoredCount
+                                Log.d(TAG, "  ${partition.name}: ${result.restoredCount} files restored")
+                            }
+                            is PermissionManager.RestoreResult.Error -> {
+                                failures++
+                                Log.e(TAG, "  ${partition.name}: Failed - ${result.message}")
+                            }
+                        }
+                    }
+                }
+                
+                Log.d(TAG, "Restore complete: $totalRestored files, $failures failures")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error restoring all permissions: ${e.message}", e)
+            }
+        }
     }
 }
 
