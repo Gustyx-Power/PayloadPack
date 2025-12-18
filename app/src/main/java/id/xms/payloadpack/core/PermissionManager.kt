@@ -1,0 +1,534 @@
+package id.xms.payloadpack.core
+
+import android.util.Log
+import com.topjohnwu.superuser.Shell
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+
+/**
+ * PermissionManager - Manages filesystem permission preservation and restoration.
+ *
+ * When extracting Android system images (system.img, vendor.img, etc.), the original
+ * file permissions are important for the ROM to function correctly. However, we need
+ * to change permissions to 777 so the UI can read files without root.
+ *
+ * This manager:
+ * 1. Saves original permissions to a `fs_config` file before chmod 777
+ * 2. Restores original permissions when repacking
+ *
+ * ## File Format (fs_config):
+ * Each line contains: path uid gid mode [capabilities]
+ * Example:
+ * ```
+ * /system 0 0 755
+ * /system/app 0 0 755
+ * /system/bin/sh 0 2000 755
+ * /system/etc/hosts 0 0 644
+ * ```
+ *
+ * This format is compatible with Android's filesystem config format.
+ */
+object PermissionManager {
+
+    private const val TAG = "PermissionManager"
+    
+    /**
+     * Name of the permission config file stored in each extracted folder.
+     */
+    const val FS_CONFIG_FILENAME = "fs_config"
+    
+    /**
+     * Name of the file contexts file (SELinux labels).
+     */
+    const val FILE_CONTEXTS_FILENAME = "file_contexts"
+
+    /**
+     * Result of permission save operation.
+     */
+    sealed class SaveResult {
+        data class Success(
+            val configPath: String,
+            val fileCount: Int
+        ) : SaveResult()
+        
+        data class Error(
+            val message: String,
+            val exception: Throwable? = null
+        ) : SaveResult()
+    }
+
+    /**
+     * Result of permission restore operation.
+     */
+    sealed class RestoreResult {
+        data class Success(
+            val restoredCount: Int
+        ) : RestoreResult()
+        
+        data class Error(
+            val message: String,
+            val exception: Throwable? = null
+        ) : RestoreResult()
+    }
+
+    // =========================================================================
+    // Public API - Save Permissions
+    // =========================================================================
+
+    /**
+     * Save file permissions of an extracted folder to fs_config.
+     *
+     * This should be called BEFORE chmod -R 777 is applied.
+     * Uses `find` and `stat` commands via root shell to capture:
+     * - File path (relative to folder)
+     * - UID (owner user ID)
+     * - GID (owner group ID)
+     * - Mode (permissions in octal, e.g., 755)
+     * - SELinux context (optional)
+     *
+     * @param extractedFolder The folder containing extracted files
+     * @param partitionName Name of the partition (e.g., "system", "vendor")
+     * @return SaveResult indicating success or failure
+     */
+    suspend fun savePermissions(
+        extractedFolder: File,
+        partitionName: String
+    ): SaveResult = withContext(Dispatchers.IO) {
+        try {
+            if (!extractedFolder.exists() || !extractedFolder.isDirectory) {
+                return@withContext SaveResult.Error(
+                    "Extracted folder does not exist: ${extractedFolder.absolutePath}"
+                )
+            }
+
+            Log.d(TAG, "Saving permissions for: ${extractedFolder.absolutePath}")
+
+            val folderPath = extractedFolder.absolutePath
+            val configFile = File(extractedFolder, FS_CONFIG_FILENAME)
+            val contextsFile = File(extractedFolder, FILE_CONTEXTS_FILENAME)
+
+            // Use find + stat to get permissions
+            // Format: path uid gid mode
+            // stat format: %u = uid, %g = gid, %a = octal mode
+            val findCmd = """
+                cd '$folderPath' && find . -print0 | while IFS= read -r -d '' file; do
+                    stat -c '%n %u %g %a' "${"$"}file" 2>/dev/null
+                done
+            """.trimIndent().replace("\n", " ")
+
+            Log.d(TAG, "Executing find+stat command...")
+            val result = Shell.cmd(findCmd).exec()
+
+            if (!result.isSuccess) {
+                // Try alternative method using ls -lnR
+                Log.w(TAG, "stat method failed, trying ls -lnR fallback...")
+                return@withContext savePermissionsWithLs(extractedFolder, partitionName)
+            }
+
+            // Parse stat output and write to config file
+            val lines = result.out.filter { it.isNotBlank() }
+            Log.d(TAG, "Found ${lines.size} files/directories")
+
+            if (lines.isEmpty()) {
+                return@withContext SaveResult.Error("No files found in extracted folder")
+            }
+
+            // Write fs_config file
+            val configContent = StringBuilder()
+            configContent.appendLine("# fs_config for $partitionName")
+            configContent.appendLine("# Format: path uid gid mode")
+            configContent.appendLine("# Generated by PayloadPack")
+            configContent.appendLine()
+
+            for (line in lines) {
+                // stat output format: ./path uid gid mode
+                val parts = line.trim().split(" ", limit = 4)
+                if (parts.size >= 4) {
+                    val path = parts[0].removePrefix(".")
+                    val uid = parts[1]
+                    val gid = parts[2]
+                    val mode = parts[3]
+                    
+                    // Convert relative path to absolute partition path
+                    val partitionPath = if (path.isEmpty() || path == "/") {
+                        "/$partitionName"
+                    } else {
+                        "/$partitionName$path"
+                    }
+                    
+                    configContent.appendLine("$partitionPath $uid $gid $mode")
+                }
+            }
+
+            // Write config file using root (in case folder is in /data)
+            val writeResult = Shell.cmd(
+                "cat > '${configFile.absolutePath}' << 'EOF'\n${configContent}EOF"
+            ).exec()
+
+            if (!writeResult.isSuccess) {
+                // Try direct write as fallback
+                try {
+                    configFile.writeText(configContent.toString())
+                } catch (e: Exception) {
+                    return@withContext SaveResult.Error(
+                        "Failed to write config file: ${e.message}",
+                        e
+                    )
+                }
+            }
+
+            // Also save SELinux contexts
+            saveSelinuxContexts(extractedFolder, contextsFile)
+
+            Log.d(TAG, "Permissions saved to: ${configFile.absolutePath}")
+            SaveResult.Success(
+                configPath = configFile.absolutePath,
+                fileCount = lines.size
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving permissions: ${e.message}", e)
+            SaveResult.Error(
+                message = "Failed to save permissions: ${e.message}",
+                exception = e
+            )
+        }
+    }
+
+    /**
+     * Alternative method using ls -lnR for systems where stat is not available.
+     */
+    private suspend fun savePermissionsWithLs(
+        extractedFolder: File,
+        partitionName: String
+    ): SaveResult = withContext(Dispatchers.IO) {
+        try {
+            val folderPath = extractedFolder.absolutePath
+            val configFile = File(extractedFolder, FS_CONFIG_FILENAME)
+
+            // Use ls -lnR to get numeric uid/gid and permissions
+            val lsResult = Shell.cmd("ls -lnR '$folderPath'").exec()
+
+            if (!lsResult.isSuccess) {
+                return@withContext SaveResult.Error(
+                    "Failed to list directory with ls -lnR: ${lsResult.err}"
+                )
+            }
+
+            val configContent = StringBuilder()
+            configContent.appendLine("# fs_config for $partitionName")
+            configContent.appendLine("# Format: path uid gid mode")
+            configContent.appendLine("# Generated by PayloadPack (ls method)")
+            configContent.appendLine()
+
+            var currentDir = ""
+            var fileCount = 0
+
+            for (line in lsResult.out) {
+                when {
+                    // Directory header: /path/to/dir:
+                    line.endsWith(":") -> {
+                        currentDir = line.dropLast(1).removePrefix(folderPath)
+                        if (currentDir.isEmpty()) currentDir = "/"
+                    }
+                    
+                    // File entry: drwxr-xr-x 2 0 0 4096 Dec 18 12:00 dirname
+                    // File entry: -rw-r--r-- 1 0 0 1234 Dec 18 12:00 filename
+                    line.isNotBlank() && !line.startsWith("total") -> {
+                        val parts = line.trim().split("\\s+".toRegex())
+                        if (parts.size >= 9) {
+                            val perms = parts[0]  // e.g., "drwxr-xr-x"
+                            val uid = parts[2]
+                            val gid = parts[3]
+                            val name = parts.drop(8).joinToString(" ")
+                            
+                            if (name != "." && name != "..") {
+                                val mode = permStringToOctal(perms)
+                                val path = if (currentDir == "/") {
+                                    "/$partitionName/$name"
+                                } else {
+                                    "/$partitionName$currentDir/$name"
+                                }
+                                
+                                configContent.appendLine("$path $uid $gid $mode")
+                                fileCount++
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Add root directory entry
+            val rootPerms = Shell.cmd("stat -c '%u %g %a' '$folderPath'").exec()
+            if (rootPerms.isSuccess && rootPerms.out.isNotEmpty()) {
+                val rootParts = rootPerms.out[0].split(" ")
+                if (rootParts.size >= 3) {
+                    configContent.insert(
+                        configContent.indexOf("\n\n") + 2,
+                        "/$partitionName ${rootParts[0]} ${rootParts[1]} ${rootParts[2]}\n"
+                    )
+                    fileCount++
+                }
+            }
+
+            // Write config file
+            Shell.cmd(
+                "cat > '${configFile.absolutePath}' << 'EOF'\n${configContent}EOF"
+            ).exec()
+
+            Log.d(TAG, "Permissions saved (ls method): $fileCount files")
+            SaveResult.Success(
+                configPath = configFile.absolutePath,
+                fileCount = fileCount
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving permissions with ls: ${e.message}", e)
+            SaveResult.Error(
+                message = "Failed to save permissions with ls: ${e.message}",
+                exception = e
+            )
+        }
+    }
+
+    /**
+     * Convert permission string (e.g., "drwxr-xr-x") to octal (e.g., "755").
+     */
+    private fun permStringToOctal(perms: String): String {
+        if (perms.length < 10) return "755" // Default fallback
+        
+        var mode = 0
+        
+        // Owner permissions (chars 1-3)
+        if (perms[1] == 'r') mode += 400
+        if (perms[2] == 'w') mode += 200
+        if (perms[3] == 'x' || perms[3] == 's') mode += 100
+        
+        // Group permissions (chars 4-6)
+        if (perms[4] == 'r') mode += 40
+        if (perms[5] == 'w') mode += 20
+        if (perms[6] == 'x' || perms[6] == 's') mode += 10
+        
+        // Other permissions (chars 7-9)
+        if (perms[7] == 'r') mode += 4
+        if (perms[8] == 'w') mode += 2
+        if (perms[9] == 'x' || perms[9] == 't') mode += 1
+        
+        // Handle setuid/setgid/sticky
+        if (perms[3] == 's' || perms[3] == 'S') mode += 4000
+        if (perms[6] == 's' || perms[6] == 'S') mode += 2000
+        if (perms[9] == 't' || perms[9] == 'T') mode += 1000
+        
+        return mode.toString()
+    }
+
+    /**
+     * Save SELinux contexts to file_contexts file.
+     */
+    private fun saveSelinuxContexts(extractedFolder: File, contextsFile: File) {
+        try {
+            val folderPath = extractedFolder.absolutePath
+            
+            // Use ls -Z to get SELinux contexts
+            val result = Shell.cmd(
+                "cd '$folderPath' && find . -exec ls -Zd {} \\; 2>/dev/null"
+            ).exec()
+
+            if (!result.isSuccess || result.out.isEmpty()) {
+                Log.w(TAG, "Could not save SELinux contexts (may not be available)")
+                return
+            }
+
+            val contextContent = StringBuilder()
+            contextContent.appendLine("# file_contexts for extracted partition")
+            contextContent.appendLine("# Format: path context")
+            contextContent.appendLine()
+
+            for (line in result.out) {
+                // Format: context path
+                // e.g., "u:object_r:system_file:s0 ./system/app"
+                val parts = line.trim().split("\\s+".toRegex(), limit = 2)
+                if (parts.size >= 2) {
+                    val context = parts[0]
+                    val path = parts[1].removePrefix(".")
+                    contextContent.appendLine("$path $context")
+                }
+            }
+
+            Shell.cmd(
+                "cat > '${contextsFile.absolutePath}' << 'EOF'\n${contextContent}EOF"
+            ).exec()
+
+            Log.d(TAG, "SELinux contexts saved to: ${contextsFile.absolutePath}")
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Error saving SELinux contexts: ${e.message}")
+        }
+    }
+
+    // =========================================================================
+    // Public API - Restore Permissions
+    // =========================================================================
+
+    /**
+     * Restore file permissions from fs_config file.
+     *
+     * This should be called BEFORE repacking to restore original permissions.
+     *
+     * @param extractedFolder The folder containing extracted files and fs_config
+     * @return RestoreResult indicating success or failure
+     */
+    suspend fun restorePermissions(
+        extractedFolder: File
+    ): RestoreResult = withContext(Dispatchers.IO) {
+        try {
+            val configFile = File(extractedFolder, FS_CONFIG_FILENAME)
+            
+            if (!configFile.exists()) {
+                return@withContext RestoreResult.Error(
+                    "fs_config file not found: ${configFile.absolutePath}"
+                )
+            }
+
+            Log.d(TAG, "Restoring permissions from: ${configFile.absolutePath}")
+
+            // Read config file
+            val lines = try {
+                configFile.readLines()
+            } catch (e: Exception) {
+                // Try with root
+                val catResult = Shell.cmd("cat '${configFile.absolutePath}'").exec()
+                if (catResult.isSuccess) {
+                    catResult.out
+                } else {
+                    return@withContext RestoreResult.Error(
+                        "Failed to read config file: ${e.message}",
+                        e
+                    )
+                }
+            }
+
+            var restoredCount = 0
+            val folderPath = extractedFolder.absolutePath
+            val partitionName = extractedFolder.name.removeSuffix("_extracted")
+
+            for (line in lines) {
+                // Skip comments and empty lines
+                if (line.isBlank() || line.startsWith("#")) continue
+
+                val parts = line.trim().split("\\s+".toRegex())
+                if (parts.size < 4) continue
+
+                val partitionPath = parts[0]  // e.g., /system/app
+                val uid = parts[1]
+                val gid = parts[2]
+                val mode = parts[3]
+
+                // Convert partition path to actual file path
+                // /system/app -> /path/to/system_extracted/app
+                val relativePath = partitionPath.removePrefix("/$partitionName")
+                val actualPath = if (relativePath.isEmpty() || relativePath == "/") {
+                    folderPath
+                } else {
+                    "$folderPath$relativePath"
+                }
+
+                // Apply permissions
+                val chownResult = Shell.cmd(
+                    "chown $uid:$gid '$actualPath' 2>/dev/null",
+                    "chmod $mode '$actualPath' 2>/dev/null"
+                ).exec()
+
+                if (chownResult.isSuccess) {
+                    restoredCount++
+                }
+            }
+
+            Log.d(TAG, "Restored permissions for $restoredCount files")
+            RestoreResult.Success(restoredCount = restoredCount)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error restoring permissions: ${e.message}", e)
+            RestoreResult.Error(
+                message = "Failed to restore permissions: ${e.message}",
+                exception = e
+            )
+        }
+    }
+
+    // =========================================================================
+    // Utility Functions
+    // =========================================================================
+
+    /**
+     * Check if fs_config exists for an extracted folder.
+     */
+    fun hasPermissionConfig(extractedFolder: File): Boolean {
+        return File(extractedFolder, FS_CONFIG_FILENAME).exists()
+    }
+
+    /**
+     * Get the path to the fs_config file.
+     */
+    fun getConfigPath(extractedFolder: File): String {
+        return File(extractedFolder, FS_CONFIG_FILENAME).absolutePath
+    }
+
+    /**
+     * Delete permission config files (cleanup).
+     */
+    fun deleteConfig(extractedFolder: File) {
+        try {
+            File(extractedFolder, FS_CONFIG_FILENAME).delete()
+            File(extractedFolder, FILE_CONTEXTS_FILENAME).delete()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error deleting config files: ${e.message}")
+        }
+    }
+
+    /**
+     * Parse fs_config file and return list of entries.
+     * Useful for UI display or debugging.
+     */
+    fun parseConfig(extractedFolder: File): List<FsConfigEntry> {
+        val configFile = File(extractedFolder, FS_CONFIG_FILENAME)
+        if (!configFile.exists()) return emptyList()
+
+        return try {
+            configFile.readLines()
+                .filter { it.isNotBlank() && !it.startsWith("#") }
+                .mapNotNull { line ->
+                    val parts = line.trim().split("\\s+".toRegex())
+                    if (parts.size >= 4) {
+                        FsConfigEntry(
+                            path = parts[0],
+                            uid = parts[1].toIntOrNull() ?: 0,
+                            gid = parts[2].toIntOrNull() ?: 0,
+                            mode = parts[3]
+                        )
+                    } else null
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing config: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Data class representing a single fs_config entry.
+     */
+    data class FsConfigEntry(
+        val path: String,
+        val uid: Int,
+        val gid: Int,
+        val mode: String
+    ) {
+        /**
+         * Get human-readable description.
+         */
+        fun toDisplayString(): String {
+            return "$path (uid=$uid, gid=$gid, mode=$mode)"
+        }
+    }
+}
