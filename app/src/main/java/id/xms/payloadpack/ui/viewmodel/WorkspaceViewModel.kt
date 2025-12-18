@@ -327,34 +327,43 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                 val fsType = detectFilesystemType(imgFile)
                 Log.d(TAG, "Detected filesystem: $fsType")
 
-                // TODO: Implement actual extraction based on filesystem type
-                // For now, we'll create a placeholder structure and log
-                when (fsType) {
+                // Execute extraction based on filesystem type
+                val success = when (fsType) {
                     FilesystemType.EXT4 -> {
                         Log.d(TAG, "Extracting EXT4 filesystem...")
-                        // TODO: Use debugfs or mount to extract
-                        extractPlaceholder(extractedFolder, "EXT4")
+                        extractExt4Image(imgFile, extractedFolder)
                     }
                     FilesystemType.EROFS -> {
                         Log.d(TAG, "Extracting EROFS filesystem...")
-                        // TODO: Use erofs-utils or mount to extract
-                        extractPlaceholder(extractedFolder, "EROFS")
+                        extractErofsImage(imgFile, extractedFolder)
+                    }
+                    FilesystemType.BOOT -> {
+                        Log.d(TAG, "Unpacking boot image...")
+                        extractBootImage(imgFile, extractedFolder)
                     }
                     FilesystemType.F2FS -> {
                         Log.d(TAG, "Extracting F2FS filesystem...")
-                        // TODO: Use mount to extract
-                        extractPlaceholder(extractedFolder, "F2FS")
+                        extractF2fsImage(imgFile, extractedFolder)
                     }
                     FilesystemType.UNKNOWN -> {
                         Log.w(TAG, "Unknown filesystem type, creating placeholder")
                         extractPlaceholder(extractedFolder, "UNKNOWN")
+                        false
+                    }
+                }
+
+                if (!success) {
+                    withContext(Dispatchers.Main) {
+                        _uiState.value = _uiState.value.copy(
+                            errorMessage = "Extraction failed for ${partition.name}. Check binaries or filesystem type."
+                        )
                     }
                 }
 
                 // Refresh partition list
                 loadExtractedPartitions()
 
-                Log.d(TAG, "Extraction complete: ${partition.name}")
+                Log.d(TAG, "Extraction complete: ${partition.name} (success: $success)")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Extraction failed: ${e.message}", e)
@@ -395,6 +404,14 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                 input.read(buffer)
             }
 
+            // Check for Android boot image magic ("ANDROID!" at offset 0)
+            if (buffer.size > 8) {
+                val bootSignature = String(buffer, 0, 8, Charsets.US_ASCII)
+                if (bootSignature == "ANDROID!") {
+                    return FilesystemType.BOOT
+                }
+            }
+
             // Check for EXT4 magic (0x53EF at offset 0x438)
             if (buffer.size > 0x438 + 2) {
                 val magic = ((buffer[0x438 + 1].toInt() and 0xFF) shl 8) or
@@ -427,6 +444,116 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
         } catch (e: Exception) {
             Log.e(TAG, "Error detecting filesystem: ${e.message}")
             return FilesystemType.UNKNOWN
+        }
+    }
+
+    /**
+     * Extract EROFS image using fsck.erofs binary.
+     */
+    private fun extractErofsImage(imgFile: File, outputFolder: File): Boolean {
+        return try {
+            val success = id.xms.payloadpack.core.BinaryManager.extractErofs(
+                imgFile.absolutePath,
+                outputFolder.absolutePath
+            )
+
+            if (success) {
+                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
+                Log.d(TAG, "EROFS extraction successful")
+            } else {
+                Log.e(TAG, "EROFS extraction failed - binary may be missing")
+            }
+
+            success
+        } catch (e: Exception) {
+            Log.e(TAG, "Error extracting EROFS: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * Extract EXT4 image using mount or simg2img.
+     */
+    private fun extractExt4Image(imgFile: File, outputFolder: File): Boolean {
+        return try {
+            val success = id.xms.payloadpack.core.BinaryManager.extractExt4(
+                imgFile.absolutePath,
+                outputFolder.absolutePath
+            )
+
+            if (success) {
+                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
+                id.xms.payloadpack.core.BinaryManager.cleanup(outputFolder.absolutePath)
+                Log.d(TAG, "EXT4 extraction successful")
+            } else {
+                Log.e(TAG, "EXT4 extraction failed")
+            }
+
+            success
+        } catch (e: Exception) {
+            Log.e(TAG, "Error extracting EXT4: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * Extract boot image using unpack_bootimg binary.
+     */
+    private fun extractBootImage(imgFile: File, outputFolder: File): Boolean {
+        return try {
+            val success = id.xms.payloadpack.core.BinaryManager.unpackBootImage(
+                imgFile.absolutePath,
+                outputFolder.absolutePath
+            )
+
+            if (success) {
+                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
+                Log.d(TAG, "Boot image unpacking successful")
+            } else {
+                Log.e(TAG, "Boot image unpacking failed - binary may be missing")
+            }
+
+            success
+        } catch (e: Exception) {
+            Log.e(TAG, "Error unpacking boot image: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * Extract F2FS image using mount.
+     */
+    private fun extractF2fsImage(imgFile: File, outputFolder: File): Boolean {
+        return try {
+            val mountPoint = "/mnt/payload_f2fs_tmp"
+
+            val mountResult = Shell.cmd(
+                "mkdir -p '$mountPoint'",
+                "mount -t f2fs -o loop,ro '${imgFile.absolutePath}' '$mountPoint'"
+            ).exec()
+
+            if (!mountResult.isSuccess) {
+                Log.e(TAG, "Failed to mount F2FS image")
+                return false
+            }
+
+            val copyResult = Shell.cmd(
+                "cp -r '$mountPoint'/* '${outputFolder.absolutePath}'/",
+                "chmod -R 777 '${outputFolder.absolutePath}'"
+            ).exec()
+
+            Shell.cmd("umount '$mountPoint'").exec()
+
+            if (copyResult.isSuccess) {
+                Log.d(TAG, "F2FS extraction successful")
+                true
+            } else {
+                Log.e(TAG, "Failed to copy F2FS files")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error extracting F2FS: ${e.message}", e)
+            false
         }
     }
 
@@ -492,6 +619,7 @@ enum class FilesystemType {
     EXT4,
     EROFS,
     F2FS,
+    BOOT,
     UNKNOWN
 }
 
