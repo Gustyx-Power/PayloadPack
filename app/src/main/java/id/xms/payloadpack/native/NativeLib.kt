@@ -79,10 +79,11 @@ object NativeLib {
      * Example success response:
      * ```json
      * {
-     *   "header": { "version_major": 2, "version_minor": 0, ... },
+     *   "header": { "version": 2, "manifest_size": 1234567, "metadata_signature_size": 256 },
+     *   "block_size": 4096,
      *   "partitions": [
-     *     { "name": "system", "size": 2147483648, "size_human": "2.00 GB", ... },
-     *     { "name": "vendor", "size": 536870912, "size_human": "512.00 MB", ... }
+     *     { "name": "system", "size": 2147483648, "size_human": "2.00 GB", "operations_count": 4521 },
+     *     { "name": "vendor", "size": 536870912, "size_human": "512.00 MB", "operations_count": 1234 }
      *   ],
      *   "total_size": 3221225472,
      *   "total_size_human": "3.00 GB"
