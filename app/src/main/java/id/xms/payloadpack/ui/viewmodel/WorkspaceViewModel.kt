@@ -53,7 +53,10 @@ data class PartitionInfo(
     val name: String,
     val path: String,
     val size: Long,
-    val sizeFormatted: String
+    val sizeFormatted: String,
+    val isExtracted: Boolean = false,
+    val extractedPath: String? = null,
+    val isExtracting: Boolean = false
 )
 
 /**
@@ -264,13 +267,21 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
                 val partitions = imgFiles.map { file ->
                     val size = file.length()
-                    Log.d(TAG, "  ${file.name}: $size bytes")
+                    val partitionName = file.nameWithoutExtension
+
+                    // Check if partition is already extracted
+                    val extractedFolder = File(projectDir, "${partitionName}_extracted")
+                    val isExtracted = extractedFolder.exists() && extractedFolder.isDirectory
+
+                    Log.d(TAG, "  ${file.name}: $size bytes (extracted: $isExtracted)")
 
                     PartitionInfo(
-                        name = file.nameWithoutExtension,
+                        name = partitionName,
                         path = file.absolutePath,
                         size = size,
-                        sizeFormatted = RootSizeCalculator.formatSize(size)
+                        sizeFormatted = RootSizeCalculator.formatSize(size),
+                        isExtracted = isExtracted,
+                        extractedPath = if (isExtracted) extractedFolder.absolutePath else null
                     )
                 }.sortedBy { it.name }
 
@@ -281,6 +292,181 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading partitions: ${e.message}", e)
             }
+        }
+    }
+
+    /**
+     * Extract partition image to a folder.
+     * Supports EXT4, EROFS, and other Android filesystem formats.
+     */
+    fun extractPartitionImage(partition: PartitionInfo) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Log.d(TAG, "Extracting partition: ${partition.name}")
+
+                // Update state to show extraction in progress
+                updatePartitionState(partition.name, isExtracting = true)
+
+                val projectDir = File(projectPath)
+                val extractedFolder = File(projectDir, "${partition.name}_extracted")
+
+                // Create extraction folder
+                if (!extractedFolder.exists()) {
+                    extractedFolder.mkdirs()
+                    Log.d(TAG, "Created folder: ${extractedFolder.absolutePath}")
+                }
+
+                // Apply permissions using root
+                Shell.cmd(
+                    "mkdir -p '${extractedFolder.absolutePath}'",
+                    "chmod 777 '${extractedFolder.absolutePath}'"
+                ).exec()
+
+                // Detect filesystem type by reading magic bytes
+                val imgFile = File(partition.path)
+                val fsType = detectFilesystemType(imgFile)
+                Log.d(TAG, "Detected filesystem: $fsType")
+
+                // TODO: Implement actual extraction based on filesystem type
+                // For now, we'll create a placeholder structure and log
+                when (fsType) {
+                    FilesystemType.EXT4 -> {
+                        Log.d(TAG, "Extracting EXT4 filesystem...")
+                        // TODO: Use debugfs or mount to extract
+                        extractPlaceholder(extractedFolder, "EXT4")
+                    }
+                    FilesystemType.EROFS -> {
+                        Log.d(TAG, "Extracting EROFS filesystem...")
+                        // TODO: Use erofs-utils or mount to extract
+                        extractPlaceholder(extractedFolder, "EROFS")
+                    }
+                    FilesystemType.F2FS -> {
+                        Log.d(TAG, "Extracting F2FS filesystem...")
+                        // TODO: Use mount to extract
+                        extractPlaceholder(extractedFolder, "F2FS")
+                    }
+                    FilesystemType.UNKNOWN -> {
+                        Log.w(TAG, "Unknown filesystem type, creating placeholder")
+                        extractPlaceholder(extractedFolder, "UNKNOWN")
+                    }
+                }
+
+                // Refresh partition list
+                loadExtractedPartitions()
+
+                Log.d(TAG, "Extraction complete: ${partition.name}")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Extraction failed: ${e.message}", e)
+                updatePartitionState(partition.name, isExtracting = false)
+
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Extraction failed: ${e.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Update the state of a specific partition.
+     */
+    private suspend fun updatePartitionState(partitionName: String, isExtracting: Boolean) {
+        withContext(Dispatchers.Main) {
+            val updatedPartitions = _uiState.value.partitions.map { partition ->
+                if (partition.name == partitionName) {
+                    partition.copy(isExtracting = isExtracting)
+                } else {
+                    partition
+                }
+            }
+            _uiState.value = _uiState.value.copy(partitions = updatedPartitions)
+        }
+    }
+
+    /**
+     * Detect filesystem type from partition image.
+     */
+    private fun detectFilesystemType(imgFile: File): FilesystemType {
+        try {
+            val buffer = ByteArray(8192)
+            imgFile.inputStream().use { input ->
+                input.read(buffer)
+            }
+
+            // Check for EXT4 magic (0x53EF at offset 0x438)
+            if (buffer.size > 0x438 + 2) {
+                val magic = ((buffer[0x438 + 1].toInt() and 0xFF) shl 8) or
+                           (buffer[0x438].toInt() and 0xFF)
+                if (magic == 0x53EF) {
+                    return FilesystemType.EXT4
+                }
+            }
+
+            // Check for EROFS magic ("E2ROFS" at offset 0x400)
+            if (buffer.size > 0x400 + 6) {
+                val erofsSignature = String(buffer, 0x400, 6, Charsets.US_ASCII)
+                if (erofsSignature.startsWith("E2RO")) {
+                    return FilesystemType.EROFS
+                }
+            }
+
+            // Check for F2FS magic (0xF2F52010 at offset 0x400)
+            if (buffer.size > 0x400 + 4) {
+                val f2fsMagic = ((buffer[0x400].toInt() and 0xFF)) or
+                               ((buffer[0x401].toInt() and 0xFF) shl 8) or
+                               ((buffer[0x402].toInt() and 0xFF) shl 16) or
+                               ((buffer[0x403].toInt() and 0xFF) shl 24)
+                if (f2fsMagic.toLong() == 0xF2F52010L) {
+                    return FilesystemType.F2FS
+                }
+            }
+
+            return FilesystemType.UNKNOWN
+        } catch (e: Exception) {
+            Log.e(TAG, "Error detecting filesystem: ${e.message}")
+            return FilesystemType.UNKNOWN
+        }
+    }
+
+    /**
+     * Create placeholder extraction (temporary until real extraction is implemented).
+     */
+    private fun extractPlaceholder(folder: File, fsType: String) {
+        // Create a README file explaining the extraction
+        val readmeFile = File(folder, "README.txt")
+        readmeFile.writeText("""
+            Partition Extraction Placeholder
+            ================================
+            
+            Filesystem Type: $fsType
+            Status: Structure created, awaiting full extraction implementation
+            
+            This folder will contain the extracted files from the partition image.
+            
+            Implementation TODO:
+            - EXT4: Use debugfs or mount with loop device
+            - EROFS: Use extract.erofs or mount
+            - F2FS: Use mount with loop device
+            
+            For now, this is a placeholder to demonstrate the UI flow.
+        """.trimIndent())
+
+        // Apply permissions
+        Shell.cmd("chmod 777 '${readmeFile.absolutePath}'").exec()
+
+        Log.d(TAG, "Created placeholder extraction in ${folder.absolutePath}")
+    }
+
+    /**
+     * Open extracted partition folder in file manager.
+     */
+    fun openExtractedFolder(partition: PartitionInfo) {
+        if (partition.extractedPath != null) {
+            Log.d(TAG, "Opening folder: ${partition.extractedPath}")
+            // TODO: Launch file manager intent
+            // For now, just log
         }
     }
 
@@ -297,5 +483,15 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
     fun retry() {
         checkPayload()
     }
+}
+
+/**
+ * Filesystem types for partition images.
+ */
+enum class FilesystemType {
+    EXT4,
+    EROFS,
+    F2FS,
+    UNKNOWN
 }
 

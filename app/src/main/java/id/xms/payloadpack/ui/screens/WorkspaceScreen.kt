@@ -33,6 +33,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -161,7 +162,17 @@ fun WorkspaceScreen(
                 else -> {
                     WorkspaceContent(
                         uiState = uiState,
-                        onStartUnpack = { viewModel.startUnpacking() }
+                        onStartUnpack = { viewModel.startUnpacking() },
+                        onExtractPartition = { partition ->
+                            viewModel.extractPartitionImage(partition)
+                        },
+                        onOpenExtracted = { partition ->
+                            viewModel.openExtractedFolder(partition)
+                        },
+                        onAssembleRom = {
+                            // TODO: Navigate to RepackProcessScreen
+                            android.util.Log.d("WorkspaceScreen", "Assemble ROM clicked")
+                        }
                     )
                 }
             }
@@ -316,6 +327,9 @@ private fun NoPayloadState(
 private fun WorkspaceContent(
     uiState: id.xms.payloadpack.ui.viewmodel.WorkspaceUiState,
     onStartUnpack: () -> Unit,
+    onExtractPartition: (id.xms.payloadpack.ui.viewmodel.PartitionInfo) -> Unit,
+    onOpenExtracted: (id.xms.payloadpack.ui.viewmodel.PartitionInfo) -> Unit,
+    onAssembleRom: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Import UnpackState to check state
@@ -355,7 +369,8 @@ private fun WorkspaceContent(
                 // Show Repack Workspace
                 item {
                     RepackWorkspaceCard(
-                        partitionCount = uiState.partitions.size
+                        partitionCount = uiState.partitions.size,
+                        onAssembleRom = onAssembleRom
                     )
                 }
 
@@ -363,7 +378,7 @@ private fun WorkspaceContent(
                 if (uiState.partitions.isNotEmpty()) {
                     item {
                         Text(
-                            text = "Extracted Partitions (${uiState.partitions.size})",
+                            text = "Partition Manager (${uiState.partitions.size})",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(vertical = 8.dp)
@@ -374,7 +389,11 @@ private fun WorkspaceContent(
                         items = uiState.partitions,
                         key = { it.path }
                     ) { partition ->
-                        PartitionCard(partition = partition)
+                        PartitionCard(
+                            partition = partition,
+                            onExtract = { onExtractPartition(partition) },
+                            onOpen = { onOpenExtracted(partition) }
+                        )
                     }
                 }
             }
@@ -491,6 +510,7 @@ private fun LoadingUnpackCard(
 @Composable
 private fun RepackWorkspaceCard(
     partitionCount: Int,
+    onAssembleRom: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -527,13 +547,13 @@ private fun RepackWorkspaceCard(
 
                 Column {
                     Text(
-                        text = "Repack Workspace",
+                        text = "Partition Manager",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onTertiaryContainer
                     )
                     Text(
-                        text = "$partitionCount partitions extracted",
+                        text = "$partitionCount partitions ready",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f)
                     )
@@ -543,8 +563,8 @@ private fun RepackWorkspaceCard(
             Spacer(modifier = Modifier.height(20.dp))
 
             Button(
-                onClick = { /* TODO: Start repack */ },
-                enabled = false, // TODO: Enable when repack is implemented
+                onClick = onAssembleRom,
+                enabled = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
@@ -557,7 +577,7 @@ private fun RepackWorkspaceCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "START REPACK (Coming Soon)",
+                    text = "ASSEMBLE ROM",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -566,7 +586,7 @@ private fun RepackWorkspaceCard(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Modify partition images and repack them into a flashable ROM.",
+                text = "Extract partitions to modify, then assemble back into a flashable ROM.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.6f),
                 textAlign = TextAlign.Center,
@@ -750,6 +770,8 @@ private fun PayloadInfoCard(
 @Composable
 private fun PartitionCard(
     partition: id.xms.payloadpack.ui.viewmodel.PartitionInfo,
+    onExtract: () -> Unit,
+    onOpen: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -767,35 +789,96 @@ private fun PartitionCard(
                 )
             },
             supportingContent = {
-                Text(
-                    text = partition.sizeFormatted,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Column {
+                    Text(
+                        text = partition.sizeFormatted,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (partition.isExtracted) {
+                        Text(
+                            text = "✓ Extracted to ${partition.name}_extracted/",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
             },
             leadingContent = {
                 Box(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.tertiaryContainer),
+                        .background(
+                            if (partition.isExtracted)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else
+                                MaterialTheme.colorScheme.tertiaryContainer
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Outlined.Storage,
                         contentDescription = null,
                         modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onTertiaryContainer
+                        tint = if (partition.isExtracted)
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        else
+                            MaterialTheme.colorScheme.onTertiaryContainer
                     )
                 }
             },
             trailingContent = {
-                Icon(
-                    imageVector = Icons.Outlined.CheckCircle,
-                    contentDescription = "Extracted",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
+                if (partition.isExtracting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else if (partition.isExtracted) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onOpen,
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                        ) {
+                            Text(
+                                text = "Open",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onExtract,
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                        ) {
+                            Text(
+                                text = "Re-Extract",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                } else {
+                    FilledTonalButton(
+                        onClick = onExtract,
+                        modifier = Modifier.height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Archive,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Extract",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             },
             colors = ListItemDefaults.colors(
                 containerColor = MaterialTheme.colorScheme.surface
