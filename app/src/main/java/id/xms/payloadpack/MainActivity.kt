@@ -68,6 +68,16 @@ class MainActivity : ComponentActivity() {
         val nativeLoaded = NativeLib.loadLibrary()
         Log.d(TAG, "Native library loaded: $nativeLoaded")
 
+        // Install extraction tool binaries
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val binPath = id.xms.payloadpack.core.BinaryManager.installTools(applicationContext)
+            if (binPath != null) {
+                Log.d(TAG, "Extraction tools installed at: $binPath")
+            } else {
+                Log.w(TAG, "Failed to install extraction tools - extraction may not work")
+            }
+        }
+
         enableEdgeToEdge()
         setContent {
             PayloadPackTheme {
