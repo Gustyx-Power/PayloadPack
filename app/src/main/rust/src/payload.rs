@@ -108,6 +108,19 @@ pub struct PartitionInfo {
     pub size_human: String,
 }
 
+/// Properties from payload_properties.txt
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct PayloadProperties {
+    /// FILE_HASH
+    pub file_hash: Option<String>,
+    /// FILE_SIZE
+    pub file_size: Option<u64>,
+    /// METADATA_HASH
+    pub metadata_hash: Option<String>,
+    /// METADATA_SIZE
+    pub metadata_size: Option<u64>,
+}
+
 /// Complete payload inspection result
 #[derive(Debug, Clone, Serialize)]
 pub struct PayloadInspection {
@@ -127,6 +140,8 @@ pub struct PayloadInspection {
     pub total_size_human: String,
     /// Path that was inspected
     pub file_path: String,
+    /// Properties from payload_properties.txt (if found)
+    pub properties: Option<PayloadProperties>,
 }
 
 /// Format bytes into human-readable string
@@ -447,6 +462,14 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
         metadata_signature_size,
     };
 
+    // =========================================================================
+    // STEP 8: Try to read payload_properties.txt if it exists
+    // =========================================================================
+    let properties = parse_payload_properties(path);
+    if properties.is_some() {
+        log::info!("✓ Found and parsed payload_properties.txt");
+    }
+
     log::info!("=== PAYLOAD INSPECTION COMPLETE ===");
     log::info!(
         "Result: {} partitions, {}",
@@ -463,6 +486,7 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
         total_size,
         total_size_human: format_size(total_size),
         file_path: path.to_string(),
+        properties,
     })
 }
 
@@ -502,6 +526,59 @@ pub fn inspect_payload_json(path: &str) -> Result<String, String> {
             Err(e.to_string())
         }
     }
+}
+
+/// Parse payload_properties.txt from the same directory as the payload.
+///
+/// Format:
+/// ```text
+/// FILE_HASH=abc123
+/// FILE_SIZE=123456789
+/// METADATA_HASH=def456
+/// METADATA_SIZE=12345
+/// ```
+fn parse_payload_properties(payload_path: &str) -> Option<PayloadProperties> {
+    use std::io::BufRead;
+
+    // Get directory of payload.bin
+    let path = Path::new(payload_path);
+    let parent = path.parent()?;
+    let properties_path = parent.join("payload_properties.txt");
+
+    log::debug!("Looking for properties at: {:?}", properties_path);
+
+    if !properties_path.exists() {
+        log::debug!("payload_properties.txt not found");
+        return None;
+    }
+
+    let file = match File::open(&properties_path) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("Could not open payload_properties.txt: {:?}", e);
+            return None;
+        }
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut props = PayloadProperties::default();
+
+    for line in reader.lines().flatten() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key.trim() {
+                "FILE_HASH" => props.file_hash = Some(value.trim().to_string()),
+                "FILE_SIZE" => props.file_size = value.trim().parse().ok(),
+                "METADATA_HASH" => props.metadata_hash = Some(value.trim().to_string()),
+                "METADATA_SIZE" => props.metadata_size = value.trim().parse().ok(),
+                _ => {}
+            }
+        }
+    }
+
+    log::debug!("Parsed properties: file_size={:?}, metadata_size={:?}", 
+                props.file_size, props.metadata_size);
+
+    Some(props)
 }
 
 #[cfg(test)]
