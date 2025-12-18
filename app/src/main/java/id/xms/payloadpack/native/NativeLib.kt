@@ -61,4 +61,39 @@ object NativeLib {
      */
     @JvmStatic
     external fun processMessage(input: String): String?
+
+    /**
+     * Inspect a payload.bin file and extract partition information.
+     *
+     * This function parses the payload header and manifest to extract:
+     * - Payload version
+     * - Block size
+     * - List of partitions with names and sizes
+     * - Total size of all partitions
+     *
+     * Memory-efficient: Only reads header and manifest, not the entire file.
+     *
+     * @param path Path to the payload.bin file (e.g., "/sdcard/PayloadPack/payload.bin")
+     * @return JSON string with payload information, or JSON with "error" field on failure
+     *
+     * Example success response:
+     * ```json
+     * {
+     *   "header": { "version_major": 2, "version_minor": 0, ... },
+     *   "partitions": [
+     *     { "name": "system", "size": 2147483648, "size_human": "2.00 GB", ... },
+     *     { "name": "vendor", "size": 536870912, "size_human": "512.00 MB", ... }
+     *   ],
+     *   "total_size": 3221225472,
+     *   "total_size_human": "3.00 GB"
+     * }
+     * ```
+     *
+     * Example error response:
+     * ```json
+     * { "error": "Payload inspection error: Invalid magic bytes" }
+     * ```
+     */
+    @JvmStatic
+    external fun inspectPayload(path: String): String?
 }
