@@ -3,12 +3,16 @@
 //! This module provides functionality to parse Android OTA payload.bin files.
 //! It reads only the header and manifest to extract partition information
 //! without loading the entire file into memory.
+//!
+//! IMPORTANT: This module is called from JNI and must NEVER panic.
+//! All errors must be returned as Result::Err, never via unwrap/expect.
 
 use byteorder::{BigEndian, ReadBytesExt};
 use prost::Message;
 use serde::Serialize;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
 use thiserror::Error;
 
 // Use the proto module with generated protobuf code
@@ -27,23 +31,49 @@ const HEADER_SIZE_V2: u64 = 24;
 /// Error types for payload parsing
 #[derive(Error, Debug)]
 pub enum PayloadError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("File not found: {0}")]
+    FileNotFound(String),
 
-    #[error("Invalid magic bytes: expected 'CrAU', got '{0}'")]
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+
+    #[error("IO error reading file: {0}")]
+    Io(String),
+
+    #[error("Invalid magic bytes: expected 'CrAU', got '{0}'. This is not a valid payload.bin file.")]
     InvalidMagic(String),
 
-    #[error("Unsupported payload version: {major}.{minor}")]
+    #[error("Unsupported payload version: {major}.{minor}. Only version 2 is supported.")]
     UnsupportedVersion { major: u32, minor: u32 },
 
     #[error("Protobuf decode error: {0}")]
-    ProtobufDecode(#[from] prost::DecodeError),
+    ProtobufDecode(String),
 
-    #[error("Manifest too large: {0} bytes (max 100MB)")]
+    #[error("Manifest too large: {0} bytes (max 100MB). File may be corrupted.")]
     ManifestTooLarge(u64),
 
-    #[error("File too small to be a valid payload")]
-    FileTooSmall,
+    #[error("File too small ({0} bytes) to be a valid payload. Minimum size is 24 bytes.")]
+    FileTooSmall(u64),
+
+    #[error("Path is empty")]
+    EmptyPath,
+}
+
+// Custom From implementations for better error messages
+impl From<std::io::Error> for PayloadError {
+    fn from(e: std::io::Error) -> Self {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => PayloadError::FileNotFound(e.to_string()),
+            std::io::ErrorKind::PermissionDenied => PayloadError::PermissionDenied(e.to_string()),
+            _ => PayloadError::Io(e.to_string()),
+        }
+    }
+}
+
+impl From<prost::DecodeError> for PayloadError {
+    fn from(e: prost::DecodeError) -> Self {
+        PayloadError::ProtobufDecode(e.to_string())
+    }
 }
 
 /// Payload header information
@@ -89,6 +119,8 @@ pub struct PayloadInspection {
     pub total_size: u64,
     /// Total size in human-readable format
     pub total_size_human: String,
+    /// Path that was inspected
+    pub file_path: String,
 }
 
 /// Format bytes into human-readable string
@@ -119,26 +151,79 @@ fn format_size(bytes: u64) -> String {
 /// # Returns
 /// * `Ok(PayloadInspection)` - Parsed payload information
 /// * `Err(PayloadError)` - If parsing fails
+///
+/// # Safety
+/// This function NEVER panics. All errors are returned via Result.
 pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
+    // Validate path is not empty
+    if path.is_empty() {
+        log::error!("Empty path provided");
+        return Err(PayloadError::EmptyPath);
+    }
+
     log::info!("Opening payload file: {}", path);
 
-    let file = File::open(path)?;
-    let file_size = file.metadata()?.len();
+    // Check if file exists before trying to open
+    let path_obj = Path::new(path);
+    if !path_obj.exists() {
+        log::error!("File does not exist: {}", path);
+        return Err(PayloadError::FileNotFound(format!(
+            "File does not exist: {}",
+            path
+        )));
+    }
+
+    // Check if it's actually a file (not a directory)
+    if !path_obj.is_file() {
+        log::error!("Path is not a file: {}", path);
+        return Err(PayloadError::FileNotFound(format!(
+            "Path is not a file: {}",
+            path
+        )));
+    }
+
+    // Try to open the file
+    let file = match File::open(path) {
+        Ok(f) => {
+            log::debug!("File opened successfully");
+            f
+        }
+        Err(e) => {
+            log::error!("Failed to open file: {} - {:?}", path, e);
+            return Err(PayloadError::from(e));
+        }
+    };
+
+    // Get file metadata
+    let metadata = match file.metadata() {
+        Ok(m) => m,
+        Err(e) => {
+            log::error!("Failed to get file metadata: {:?}", e);
+            return Err(PayloadError::from(e));
+        }
+    };
+
+    let file_size = metadata.len();
+    log::debug!("File size: {} bytes", file_size);
 
     if file_size < HEADER_SIZE_V2 {
-        return Err(PayloadError::FileTooSmall);
+        log::error!("File too small: {} bytes", file_size);
+        return Err(PayloadError::FileTooSmall(file_size));
     }
 
     let mut reader = BufReader::new(file);
 
     // Read and verify magic bytes
     let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic)?;
+    if let Err(e) = reader.read_exact(&mut magic) {
+        log::error!("Failed to read magic bytes: {:?}", e);
+        return Err(PayloadError::from(e));
+    }
 
     if &magic != PAYLOAD_MAGIC {
-        return Err(PayloadError::InvalidMagic(
-            String::from_utf8_lossy(&magic).to_string(),
-        ));
+        let magic_str = String::from_utf8_lossy(&magic).to_string();
+        log::error!("Invalid magic bytes: {:?} ({})", magic, magic_str);
+        return Err(PayloadError::InvalidMagic(magic_str));
     }
 
     log::debug!("Magic bytes verified: CrAU");
@@ -150,13 +235,25 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
     // - 4 bytes: metadata signature size (uint32, big-endian)
 
     // Read version (already at offset 4 after magic)
-    let version = reader.read_u64::<BigEndian>()?;
+    let version = match reader.read_u64::<BigEndian>() {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("Failed to read version: {:?}", e);
+            return Err(PayloadError::from(e));
+        }
+    };
+
     let version_major = (version >> 32) as u32;
     let version_minor = (version & 0xFFFFFFFF) as u32;
 
     log::debug!("Payload version: {}.{}", version_major, version_minor);
 
     if version_major != 2 {
+        log::error!(
+            "Unsupported version: {}.{}",
+            version_major,
+            version_minor
+        );
         return Err(PayloadError::UnsupportedVersion {
             major: version_major,
             minor: version_minor,
@@ -164,32 +261,68 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
     }
 
     // Read manifest size
-    let manifest_size = reader.read_u64::<BigEndian>()?;
+    let manifest_size = match reader.read_u64::<BigEndian>() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("Failed to read manifest size: {:?}", e);
+            return Err(PayloadError::from(e));
+        }
+    };
+
     log::debug!("Manifest size: {} bytes", manifest_size);
 
     // Sanity check: manifest shouldn't be larger than 100MB
     if manifest_size > 100 * 1024 * 1024 {
+        log::error!("Manifest too large: {} bytes", manifest_size);
         return Err(PayloadError::ManifestTooLarge(manifest_size));
     }
 
     // Read metadata signature size (v2+)
-    let metadata_signature_size = reader.read_u32::<BigEndian>()?;
-    log::debug!("Metadata signature size: {} bytes", metadata_signature_size);
+    let metadata_signature_size = match reader.read_u32::<BigEndian>() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("Failed to read metadata signature size: {:?}", e);
+            return Err(PayloadError::from(e));
+        }
+    };
+
+    log::debug!(
+        "Metadata signature size: {} bytes",
+        metadata_signature_size
+    );
 
     // Now read the manifest
     // Current position should be at HEADER_SIZE_V2 (24 bytes)
     let manifest_offset = HEADER_SIZE_V2;
-    reader.seek(SeekFrom::Start(manifest_offset))?;
+    if let Err(e) = reader.seek(SeekFrom::Start(manifest_offset)) {
+        log::error!("Failed to seek to manifest: {:?}", e);
+        return Err(PayloadError::from(e));
+    }
 
     let mut manifest_data = vec![0u8; manifest_size as usize];
-    reader.read_exact(&mut manifest_data)?;
+    if let Err(e) = reader.read_exact(&mut manifest_data) {
+        log::error!("Failed to read manifest data: {:?}", e);
+        return Err(PayloadError::from(e));
+    }
 
     log::debug!("Read {} bytes of manifest data", manifest_data.len());
 
     // Parse the protobuf manifest
-    let manifest = DeltaArchiveManifest::decode(&manifest_data[..])?;
+    let manifest = match DeltaArchiveManifest::decode(&manifest_data[..]) {
+        Ok(m) => {
+            log::debug!("Manifest parsed successfully");
+            m
+        }
+        Err(e) => {
+            log::error!("Failed to decode protobuf manifest: {:?}", e);
+            return Err(PayloadError::from(e));
+        }
+    };
 
-    log::info!("Parsed manifest with {} partitions", manifest.partitions.len());
+    log::info!(
+        "Parsed manifest with {} partitions",
+        manifest.partitions.len()
+    );
 
     // Extract partition information
     let mut partitions = Vec::new();
@@ -199,7 +332,7 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
         let size = partition
             .new_partition_info
             .as_ref()
-            .map(|info| info.size.unwrap_or(0))
+            .and_then(|info| info.size)
             .unwrap_or(0);
 
         total_size += size;
@@ -222,6 +355,12 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
         metadata_signature_size,
     };
 
+    log::info!(
+        "Inspection complete: {} partitions, {} total",
+        partitions.len(),
+        format_size(total_size)
+    );
+
     Ok(PayloadInspection {
         header,
         block_size: manifest.block_size.unwrap_or(4096),
@@ -230,12 +369,14 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
         partitions,
         total_size,
         total_size_human: format_size(total_size),
+        file_path: path.to_string(),
     })
 }
 
 /// Inspect a payload and return the result as a JSON string.
 ///
 /// This is the main entry point for JNI calls.
+/// This function NEVER panics - all errors are encoded in the return value.
 ///
 /// # Arguments
 /// * `path` - Path to the payload.bin file
@@ -244,12 +385,29 @@ pub fn inspect_payload(path: &str) -> Result<PayloadInspection, PayloadError> {
 /// * `Ok(String)` - JSON string with payload information
 /// * `Err(String)` - Error message if parsing fails
 pub fn inspect_payload_json(path: &str) -> Result<String, String> {
+    log::info!("inspect_payload_json called with path: {}", path);
+
     match inspect_payload(path) {
         Ok(inspection) => {
-            serde_json::to_string_pretty(&inspection)
-                .map_err(|e| format!("JSON serialization error: {}", e))
+            log::debug!("Inspection successful, serializing to JSON");
+            match serde_json::to_string_pretty(&inspection) {
+                Ok(json) => {
+                    log::debug!(
+                        "JSON serialization successful, {} bytes",
+                        json.len()
+                    );
+                    Ok(json)
+                }
+                Err(e) => {
+                    log::error!("JSON serialization failed: {:?}", e);
+                    Err(format!("JSON serialization error: {}", e))
+                }
+            }
         }
-        Err(e) => Err(format!("Payload inspection error: {}", e)),
+        Err(e) => {
+            log::error!("Payload inspection failed: {}", e);
+            Err(e.to_string())
+        }
     }
 }
 
@@ -265,5 +423,27 @@ mod tests {
         assert_eq!(format_size(1536), "1.50 KB");
         assert_eq!(format_size(1048576), "1.00 MB");
         assert_eq!(format_size(1073741824), "1.00 GB");
+    }
+
+    #[test]
+    fn test_empty_path_error() {
+        let result = inspect_payload("");
+        assert!(result.is_err());
+        if let Err(PayloadError::EmptyPath) = result {
+            // Expected
+        } else {
+            panic!("Expected EmptyPath error");
+        }
+    }
+
+    #[test]
+    fn test_nonexistent_file_error() {
+        let result = inspect_payload("/nonexistent/path/to/file.bin");
+        assert!(result.is_err());
+        if let Err(PayloadError::FileNotFound(_)) = result {
+            // Expected
+        } else {
+            panic!("Expected FileNotFound error");
+        }
     }
 }
