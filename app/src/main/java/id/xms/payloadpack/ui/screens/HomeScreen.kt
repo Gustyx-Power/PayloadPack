@@ -86,6 +86,7 @@ import androidx.compose.ui.unit.dp
 import id.xms.payloadpack.R
 import id.xms.payloadpack.core.DirectoryManager
 import id.xms.payloadpack.core.StorageHelper
+import id.xms.payloadpack.core.ZipHelper
 import id.xms.payloadpack.native.NativeLib
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -99,6 +100,7 @@ private const val TAG = "HomeScreen"
  */
 sealed class HomeState {
     data object Empty : HomeState()
+    data class Extracting(val progress: Float, val currentFile: String) : HomeState()
     data object Loading : HomeState()
     data class Loaded(val payload: PayloadData) : HomeState()
     data class Error(val message: String) : HomeState()
@@ -381,6 +383,10 @@ fun HomeScreen(
                             loadPayload(StorageHelper.getDefaultPayloadPath())
                         }
                     )
+                    is HomeState.Extracting -> ExtractingState(
+                        progress = state.progress,
+                        currentFile = state.currentFile
+                    )
                     HomeState.Loading -> LoadingState()
                     is HomeState.Loaded -> PayloadContent(
                         payload = state.payload,
@@ -554,6 +560,72 @@ private fun EmptyState(
                     Text("Load Default Payload")
                 }
             }
+        }
+    }
+}
+
+/**
+ * Extracting state with progress bar.
+ */
+@Composable
+private fun ExtractingState(
+    progress: Float,
+    currentFile: String,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Archive,
+                contentDescription = null,
+                modifier = Modifier.size(64.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text(
+                text = "Extracting ROM...",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            LinearProgressIndicator(
+                progress = { progress.coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth(0.8f)
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp)),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "${(progress * 100).toInt()}%",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = currentFile.split("/").lastOrNull() ?: currentFile,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
