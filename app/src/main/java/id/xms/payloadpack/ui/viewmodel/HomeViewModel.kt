@@ -61,7 +61,18 @@ class HomeViewModel : ViewModel() {
     init {
         Log.d(TAG, "HomeViewModel initialized")
         loadNativeLibrary()
+        ensureWorkspacePermissions()
         refreshAll()
+    }
+
+    /**
+     * Ensure proper permissions on the workspace directory.
+     * This fixes any existing folders that weren't chmod'd properly.
+     */
+    private fun ensureWorkspacePermissions() {
+        viewModelScope.launch {
+            repository.ensurePermissions()
+        }
     }
 
     /**
@@ -178,6 +189,7 @@ class HomeViewModel : ViewModel() {
                     when (result) {
                         is ZipHelper.ExtractResult.Success -> {
                             Log.d(TAG, "Extraction successful: ${result.extractedDir}")
+                            Log.d(TAG, "Project name: ${result.projectName}")
                             
                             if (result.payloadPath != null) {
                                 // Parse the payload
@@ -211,22 +223,12 @@ class HomeViewModel : ViewModel() {
                         }
                     }
                 } else {
-                    // Direct payload.bin - copy to work directory
-                    val projectPath = repository.createProject(source.name)
-                    
-                    if (projectPath != null) {
-                        // Copy the file
-                        // TODO: Implement direct copy
-                        _uiState.value = _uiState.value.copy(
-                            extractionState = ExtractionState.Success(projectPath),
-                            selectedTabIndex = 1
+                    // Direct payload.bin - not yet supported
+                    _uiState.value = _uiState.value.copy(
+                        extractionState = ExtractionState.Error(
+                            "Direct .bin files not yet supported. Please use a ROM ZIP."
                         )
-                        refreshProjects()
-                    } else {
-                        _uiState.value = _uiState.value.copy(
-                            extractionState = ExtractionState.Error("Failed to create project")
-                        )
-                    }
+                    )
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Unpack failed: ${e.message}", e)

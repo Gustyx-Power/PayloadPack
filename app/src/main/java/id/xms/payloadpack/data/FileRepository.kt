@@ -48,6 +48,9 @@ data class Project(
  * - Scanning /sdcard/PayloadPack for source ROMs
  * - Scanning /data/PayloadPack for extracted projects
  * - CRUD operations on projects
+ * 
+ * NOTE: After extraction, chmod -R 777 is applied to /data/PayloadPack,
+ * so standard File API should work. Root is used as fallback only.
  */
 class FileRepository {
 
@@ -85,8 +88,7 @@ class FileRepository {
             } ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to list files: ${e.message}")
-            // Fallback to root ls if permission denied
-            listFilesWithRoot(userDir.absolutePath)
+            emptyList()
         }
 
         files.map { file ->
@@ -105,84 +107,102 @@ class FileRepository {
     }
 
     /**
-     * Scan /data/PayloadPack for extracted projects
-     * Requires root access
+     * Scan /data/PayloadPack for extracted projects.
+     * 
+     * After extraction, chmod -R 777 is applied, so standard File API works.
+     * Falls back to root shell if File API fails.
      */
     suspend fun scanProjects(): List<Project> = withContext(Dispatchers.IO) {
         Log.d(TAG, "Scanning projects in ${DirectoryManager.WORK_DIR}")
-
-        // /data requires root, so use Shell commands
-        val result = Shell.cmd("ls -la '${DirectoryManager.WORK_DIR}' 2>/dev/null").exec()
         
-        if (!result.isSuccess || result.out.isEmpty()) {
-            Log.w(TAG, "No projects found or cannot access work directory")
+        val workDir = File(DirectoryManager.WORK_DIR)
+        
+        // Try standard File API first (should work after chmod -R 777)
+        val folders = try {
+            if (workDir.exists() && workDir.canRead()) {
+                Log.d(TAG, "Using standard File API to list projects")
+                workDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
+            } else {
+                Log.d(TAG, "Cannot read work directory, falling back to root")
+                listFoldersWithRoot()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "File API failed: ${e.message}, falling back to root")
+            listFoldersWithRoot()
+        }
+        
+        if (folders.isEmpty()) {
+            Log.d(TAG, "No projects found")
             return@withContext emptyList()
         }
-
-        // Parse ls output
-        // Format: drwxrwxrwx  2 root root 4096 2024-01-15 10:30 foldername
-        val projects = mutableListOf<Project>()
         
-        for (line in result.out) {
-            // Skip . and .. and non-directory entries
-            if (line.startsWith("total") || line.isEmpty()) continue
-            if (!line.startsWith("d")) continue  // Only directories
-            
-            val parts = line.split(Regex("\\s+"), limit = 9)
-            if (parts.size < 9) continue
-            
-            val name = parts[8]
-            if (name == "." || name == "..") continue
-            
-            val path = "${DirectoryManager.WORK_DIR}/$name"
-            
-            // Get more details about this project
-            val projectInfo = getProjectInfo(path)
-            
-            projects.add(
-                Project(
-                    name = name,
-                    path = path,
-                    hasPayload = projectInfo.hasPayload,
-                    partitionCount = projectInfo.partitionCount,
-                    totalSize = projectInfo.totalSize,
-                    sizeHuman = StorageHelper.formatSize(projectInfo.totalSize),
-                    lastModified = projectInfo.lastModified,
-                    lastModifiedFormatted = dateFormatter.format(Date(projectInfo.lastModified))
-                )
-            )
+        Log.d(TAG, "Found ${folders.size} project folders")
+        
+        val projects = folders.mapNotNull { folder ->
+            try {
+                getProjectFromFolder(folder)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to read project ${folder.name}: ${e.message}")
+                null
+            }
         }
 
         projects.sortedByDescending { it.lastModified }.also {
-            Log.d(TAG, "Found ${it.size} projects")
+            Log.d(TAG, "Returning ${it.size} projects")
         }
     }
 
     /**
-     * Create a new project directory for extraction
+     * Create project info from a folder.
      */
-    suspend fun createProject(sourceName: String): String? = withContext(Dispatchers.IO) {
-        val projectName = sourceName
-            .substringBeforeLast(".")
-            .replace(Regex("[^a-zA-Z0-9_-]"), "_")
-            .take(50)
+    private fun getProjectFromFolder(folder: File): Project {
+        val name = folder.name
+        val path = folder.absolutePath
         
-        val projectPath = "${DirectoryManager.WORK_DIR}/$projectName"
+        // Check for payload.bin
+        val payloadFile = File(folder, "payload.bin")
+        val hasPayload = payloadFile.exists()
         
-        Log.d(TAG, "Creating project: $projectPath")
+        // Count .img files (extracted partitions)
+        val partitionCount = folder.walk()
+            .filter { it.isFile && it.extension.lowercase() == "img" }
+            .count()
         
-        val result = Shell.cmd(
-            "mkdir -p '$projectPath'",
-            "chmod 777 '$projectPath'"
-        ).exec()
+        // Calculate total size
+        val totalSize = folder.walk()
+            .filter { it.isFile }
+            .sumOf { it.length() }
         
-        if (result.isSuccess) {
-            Log.d(TAG, "Project created successfully")
-            projectPath
-        } else {
-            Log.e(TAG, "Failed to create project: ${result.err}")
-            null
+        // Get last modified
+        val lastModified = folder.lastModified()
+        
+        return Project(
+            name = name,
+            path = path,
+            hasPayload = hasPayload,
+            partitionCount = partitionCount,
+            totalSize = totalSize,
+            sizeHuman = StorageHelper.formatSize(totalSize),
+            lastModified = lastModified,
+            lastModifiedFormatted = dateFormatter.format(Date(lastModified))
+        )
+    }
+
+    /**
+     * Fallback: list folders using root shell when File API fails
+     */
+    private fun listFoldersWithRoot(): List<File> {
+        Log.d(TAG, "Using root shell to list folders")
+        
+        val result = Shell.cmd("ls -1 '${DirectoryManager.WORK_DIR}' 2>/dev/null").exec()
+        if (!result.isSuccess || result.out.isEmpty()) {
+            Log.w(TAG, "Root ls failed or empty: ${result.err}")
+            return emptyList()
         }
+        
+        return result.out
+            .filter { it.isNotBlank() && !it.startsWith(".") }
+            .map { File("${DirectoryManager.WORK_DIR}/$it") }
     }
 
     /**
@@ -197,10 +217,30 @@ class FileRepository {
             return@withContext false
         }
         
+        // Try standard File API first
+        val folder = File(path)
+        val deleted = try {
+            if (folder.exists() && folder.canWrite()) {
+                folder.deleteRecursively()
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "File API delete failed: ${e.message}")
+            false
+        }
+        
+        if (deleted) {
+            Log.d(TAG, "Project deleted successfully (File API)")
+            return@withContext true
+        }
+        
+        // Fallback to root
+        Log.d(TAG, "Falling back to root for deletion")
         val result = Shell.cmd("rm -rf '$path'").exec()
         
         if (result.isSuccess) {
-            Log.d(TAG, "Project deleted successfully")
+            Log.d(TAG, "Project deleted successfully (root)")
             true
         } else {
             Log.e(TAG, "Failed to delete project: ${result.err}")
@@ -209,89 +249,31 @@ class FileRepository {
     }
 
     /**
-     * Get the payload.bin path for a source file
-     * If it's a ZIP, we need to extract first
-     * If it's a .bin, return its path directly
+     * Get the payload.bin path for a project
      */
-    fun getPayloadPath(source: SourceFile): String {
-        return if (source.isZip) {
-            // Will need extraction first
-            ""
+    fun getPayloadPath(projectPath: String): String? {
+        val payloadFile = File(projectPath, "payload.bin")
+        return if (payloadFile.exists()) payloadFile.absolutePath else null
+    }
+
+    /**
+     * Ensure proper permissions on work directory.
+     * Call this after app startup to fix any permission issues.
+     */
+    suspend fun ensurePermissions(): Boolean = withContext(Dispatchers.IO) {
+        Log.d(TAG, "Ensuring permissions on ${DirectoryManager.WORK_DIR}")
+        
+        val result = Shell.cmd(
+            "chmod 755 '${DirectoryManager.WORK_DIR}'",
+            "chmod -R 777 '${DirectoryManager.WORK_DIR}'"
+        ).exec()
+        
+        if (result.isSuccess) {
+            Log.d(TAG, "Permissions applied successfully")
         } else {
-            source.path
-        }
-    }
-
-    // =========================================================================
-    // Private helpers
-    // =========================================================================
-
-    /**
-     * Fallback: list files using root shell when Java File API fails
-     */
-    private fun listFilesWithRoot(dirPath: String): List<File> {
-        Log.d(TAG, "Using root to list files in: $dirPath")
-        
-        val result = Shell.cmd("ls -la '$dirPath' 2>/dev/null").exec()
-        if (!result.isSuccess) return emptyList()
-        
-        val files = mutableListOf<File>()
-        
-        for (line in result.out) {
-            if (line.startsWith("total") || line.isEmpty()) continue
-            if (line.startsWith("d")) continue  // Skip directories
-            
-            val parts = line.split(Regex("\\s+"), limit = 9)
-            if (parts.size < 9) continue
-            
-            val name = parts[8]
-            val extension = name.substringAfterLast(".", "").lowercase()
-            
-            if (SUPPORTED_EXTENSIONS.contains(extension)) {
-                files.add(File("$dirPath/$name"))
-            }
+            Log.w(TAG, "Permission fix failed: ${result.err}")
         }
         
-        return files
-    }
-
-    /**
-     * Get detailed info about a project directory
-     */
-    private data class ProjectInfo(
-        val hasPayload: Boolean,
-        val partitionCount: Int,
-        val totalSize: Long,
-        val lastModified: Long
-    )
-
-    private fun getProjectInfo(projectPath: String): ProjectInfo {
-        // Check for payload.bin
-        val hasPayload = Shell.cmd("test -f '$projectPath/payload.bin'").exec().isSuccess
-        
-        // Count .img files (partitions)
-        val countResult = Shell.cmd(
-            "find '$projectPath' -name '*.img' 2>/dev/null | wc -l"
-        ).exec()
-        val partitionCount = countResult.out.firstOrNull()?.trim()?.toIntOrNull() ?: 0
-        
-        // Get total size
-        val sizeResult = Shell.cmd(
-            "du -sb '$projectPath' 2>/dev/null | cut -f1"
-        ).exec()
-        val totalSize = sizeResult.out.firstOrNull()?.trim()?.toLongOrNull() ?: 0L
-        
-        // Get last modified time
-        val statResult = Shell.cmd(
-            "stat -c %Y '$projectPath' 2>/dev/null"
-        ).exec()
-        val lastModified = (statResult.out.firstOrNull()?.trim()?.toLongOrNull() ?: 0L) * 1000
-        
-        return ProjectInfo(
-            hasPayload = hasPayload,
-            partitionCount = partitionCount,
-            totalSize = totalSize,
-            lastModified = if (lastModified > 0) lastModified else System.currentTimeMillis()
-        )
+        result.isSuccess
     }
 }

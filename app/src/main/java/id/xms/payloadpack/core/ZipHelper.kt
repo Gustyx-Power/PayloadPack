@@ -15,7 +15,10 @@ import java.util.zip.ZipInputStream
  * ZipHelper - Efficient extraction of large ROM ZIP files.
  *
  * Uses buffered streams for memory efficiency with 3GB+ files.
- * Extracts to /data/PayloadPack/work_dir/ using root permissions.
+ * Extracts to /data/PayloadPack/ using root permissions.
+ * 
+ * IMPORTANT: After extraction, chmod -R 777 is applied so the UI layer
+ * can read files without needing root for every operation.
  */
 object ZipHelper {
 
@@ -30,6 +33,7 @@ object ZipHelper {
     sealed class ExtractResult {
         data class Success(
             val extractedDir: String,
+            val projectName: String,
             val payloadPath: String?,
             val propertiesPath: String?,
             val filesExtracted: Int,
@@ -40,12 +44,16 @@ object ZipHelper {
     }
 
     /**
-     * Extract a ROM ZIP file to the work directory.
+     * Extract a ROM ZIP file to a project directory.
+     * 
+     * The project folder is named after the ZIP file (without extension).
+     * Example: "PixelOS_Marble.zip" -> "/data/PayloadPack/PixelOS_Marble/"
      *
      * This function:
-     * 1. Creates a unique work directory under /data/PayloadPack/
+     * 1. Creates a project directory named after the ZIP file
      * 2. Extracts only essential files (payload.bin, payload_properties.txt, META-INF)
-     * 3. Returns paths to the extracted payload files
+     * 3. Applies chmod -R 777 so UI can read files without root
+     * 4. Returns paths to the extracted payload files
      *
      * @param zipPath Path to the input ZIP file
      * @param extractAll If true, extract all files. If false, only extract payload-related files.
@@ -68,19 +76,25 @@ object ZipHelper {
         val zipSize = zipFile.length()
         Log.i(TAG, "ZIP size: ${StorageHelper.formatSize(zipSize)}")
         
-        // Create unique work directory
-        val timestamp = System.currentTimeMillis()
-        val workDirName = "rom_${timestamp}"
-        val workDir = "${DirectoryManager.WORK_DIR}/$workDirName"
+        // Generate project name from ZIP filename
+        val projectName = generateProjectName(zipFile.nameWithoutExtension)
+        val projectDir = "${DirectoryManager.WORK_DIR}/$projectName"
+        
+        Log.i(TAG, "Project name: $projectName")
+        Log.i(TAG, "Project directory: $projectDir")
         
         // Create directory with root (since /data requires root)
-        val mkdirResult = Shell.cmd("mkdir -p '$workDir'", "chmod 777 '$workDir'").exec()
+        val mkdirResult = Shell.cmd(
+            "mkdir -p '$projectDir'",
+            "chmod 777 '$projectDir'"
+        ).exec()
+        
         if (!mkdirResult.isSuccess) {
-            Log.e(TAG, "Failed to create work directory: ${mkdirResult.err}")
-            return@withContext ExtractResult.Error("Failed to create work directory")
+            Log.e(TAG, "Failed to create project directory: ${mkdirResult.err}")
+            return@withContext ExtractResult.Error("Failed to create project directory")
         }
         
-        Log.i(TAG, "Work directory created: $workDir")
+        Log.i(TAG, "Project directory created: $projectDir")
         
         var payloadPath: String? = null
         var propertiesPath: String? = null
@@ -102,13 +116,12 @@ object ZipHelper {
                 val shouldExtract = extractAll || isEssentialFile(entryName)
                 
                 if (shouldExtract && !entry.isDirectory) {
-                    val outputPath = "$workDir/$entryName"
+                    val outputPath = "$projectDir/$entryName"
                     val outputFile = File(outputPath)
                     
                     // Create parent directories
                     outputFile.parentFile?.let { parent ->
                         if (!parent.exists()) {
-                            // Use root to create directories in /data
                             Shell.cmd("mkdir -p '${parent.absolutePath}'").exec()
                         }
                     }
@@ -116,8 +129,7 @@ object ZipHelper {
                     Log.d(TAG, "Extracting: $entryName (${StorageHelper.formatSize(entry.size)})")
                     onProgress?.invoke(bytesExtracted, zipSize, entryName)
                     
-                    // Extract file using buffered write
-                    // For /data, we need to extract via a temp file first, then move with root
+                    // Extract file using buffered write via temp file
                     val tempFile = File.createTempFile("extract_", ".tmp")
                     
                     try {
@@ -163,10 +175,25 @@ object ZipHelper {
             bis.close()
             fis.close()
             
+            // =================================================================
+            // CRITICAL: Apply chmod -R 777 so UI can read without root
+            // =================================================================
+            Log.i(TAG, "Applying chmod -R 777 to project directory...")
+            val chmodResult = Shell.cmd("chmod -R 777 '$projectDir'").exec()
+            if (!chmodResult.isSuccess) {
+                Log.w(TAG, "chmod failed (non-fatal): ${chmodResult.err}")
+            } else {
+                Log.i(TAG, "chmod -R 777 applied successfully")
+            }
+            
+            // Also ensure the parent directory is readable
+            Shell.cmd("chmod 755 '${DirectoryManager.WORK_DIR}'").exec()
+            
             Log.i(TAG, "Extraction complete: $filesExtracted files, ${StorageHelper.formatSize(bytesExtracted)}")
             
             ExtractResult.Success(
-                extractedDir = workDir,
+                extractedDir = projectDir,
+                projectName = projectName,
                 payloadPath = payloadPath,
                 propertiesPath = propertiesPath,
                 filesExtracted = filesExtracted,
@@ -176,9 +203,51 @@ object ZipHelper {
         } catch (e: Exception) {
             Log.e(TAG, "Extraction failed: ${e.message}", e)
             // Cleanup on failure
-            Shell.cmd("rm -rf '$workDir'").exec()
+            Shell.cmd("rm -rf '$projectDir'").exec()
             ExtractResult.Error("Extraction failed: ${e.message}")
         }
+    }
+
+    /**
+     * Generate a valid project name from the input string.
+     * 
+     * - Sanitizes special characters
+     * - Handles duplicates by appending _1, _2, etc.
+     * - Limits length to 50 characters
+     */
+    private fun generateProjectName(baseName: String): String {
+        // Sanitize: replace invalid characters with underscore
+        val sanitized = baseName
+            .replace(Regex("[^a-zA-Z0-9_\\-.]"), "_")
+            .replace(Regex("_+"), "_")  // Collapse multiple underscores
+            .trim('_')
+            .take(50)
+        
+        val projectName = sanitized.ifEmpty { "project" }
+        
+        // Check if folder already exists
+        val baseDir = DirectoryManager.WORK_DIR
+        val checkResult = Shell.cmd("test -d '$baseDir/$projectName'").exec()
+        
+        if (!checkResult.isSuccess) {
+            // Folder doesn't exist, use as-is
+            return projectName
+        }
+        
+        // Folder exists, find a unique suffix
+        var suffix = 1
+        while (suffix < 100) {
+            val candidateName = "${projectName}_$suffix"
+            val checkCandidate = Shell.cmd("test -d '$baseDir/$candidateName'").exec()
+            if (!checkCandidate.isSuccess) {
+                Log.d(TAG, "Using unique name: $candidateName")
+                return candidateName
+            }
+            suffix++
+        }
+        
+        // Fallback with timestamp
+        return "${projectName}_${System.currentTimeMillis()}"
     }
 
     /**
@@ -194,17 +263,25 @@ object ZipHelper {
 
     /**
      * Parse payload_properties.txt and return as a map.
-     *
-     * Format:
-     * FILE_HASH=abc123
-     * FILE_SIZE=123456789
-     * METADATA_HASH=def456
-     * METADATA_SIZE=12345
      */
     suspend fun parsePayloadProperties(propertiesPath: String): Map<String, String>? = 
         withContext(Dispatchers.IO) {
             try {
-                // Read with root since it's in /data
+                // Try standard file read first (after chmod)
+                val file = File(propertiesPath)
+                if (file.canRead()) {
+                    val properties = mutableMapOf<String, String>()
+                    file.readLines().forEach { line ->
+                        val parts = line.split("=", limit = 2)
+                        if (parts.size == 2) {
+                            properties[parts[0].trim()] = parts[1].trim()
+                        }
+                    }
+                    Log.d(TAG, "Parsed properties (file): ${properties.keys}")
+                    return@withContext properties
+                }
+                
+                // Fallback to root shell
                 val result = Shell.cmd("cat '$propertiesPath'").exec()
                 if (!result.isSuccess) {
                     Log.e(TAG, "Failed to read properties: ${result.err}")
@@ -219,7 +296,7 @@ object ZipHelper {
                     }
                 }
                 
-                Log.d(TAG, "Parsed properties: ${properties.keys}")
+                Log.d(TAG, "Parsed properties (root): ${properties.keys}")
                 properties
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse properties: ${e.message}")
@@ -235,38 +312,4 @@ object ZipHelper {
         val result = Shell.cmd("rm -rf '$extractedDir'").exec()
         result.isSuccess
     }
-
-    /**
-     * List all extracted ROMs in the work directory.
-     */
-    suspend fun listExtractedRoms(): List<ExtractedRom> = withContext(Dispatchers.IO) {
-        val result = Shell.cmd("ls -1 '${DirectoryManager.WORK_DIR}' 2>/dev/null").exec()
-        if (!result.isSuccess) {
-            return@withContext emptyList()
-        }
-        
-        result.out.mapNotNull { dirName ->
-            if (dirName.startsWith("rom_")) {
-                val path = "${DirectoryManager.WORK_DIR}/$dirName"
-                val payloadExists = Shell.cmd("test -f '$path/payload.bin'").exec().isSuccess
-                
-                ExtractedRom(
-                    name = dirName,
-                    path = path,
-                    hasPayload = payloadExists,
-                    timestamp = dirName.removePrefix("rom_").toLongOrNull() ?: 0
-                )
-            } else null
-        }.sortedByDescending { it.timestamp }
-    }
-
-    /**
-     * Represents an extracted ROM in the work directory.
-     */
-    data class ExtractedRom(
-        val name: String,
-        val path: String,
-        val hasPayload: Boolean,
-        val timestamp: Long
-    )
 }
