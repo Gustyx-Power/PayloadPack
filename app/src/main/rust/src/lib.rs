@@ -175,6 +175,99 @@ pub extern "system" fn Java_id_xms_payloadpack_native_NativeLib_inspectPayload<'
     }
 }
 
+/// JNI Function: Extract partition images from payload.bin
+///
+/// Extracts all partitions from a payload.bin file to the specified output directory.
+/// Uses streaming I/O to handle large files without OOM.
+///
+/// # JNI Signature
+/// ```
+/// public static native String extractPayload(String payloadPath, String outputDir);
+/// ```
+///
+/// # Arguments
+/// * `payloadPath` - Path to the payload.bin file
+/// * `outputDir` - Directory where .img files will be written
+///
+/// # Returns
+/// * JSON string with status and result
+///
+/// Success response:
+/// ```json
+/// {
+///   "status": "success",
+///   "extracted": [
+///     {"name": "system", "size": 2147483648, "path": "/data/PayloadPack/project/system.img"},
+///     {"name": "vendor", "size": 536870912, "path": "/data/PayloadPack/project/vendor.img"}
+///   ]
+/// }
+/// ```
+///
+/// Error response:
+/// ```json
+/// {
+///   "status": "error",
+///   "message": "Failed to write partition: Permission denied"
+/// }
+/// ```
+///
+/// # Safety
+/// This function is called from the JVM and must not panic.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_id_xms_payloadpack_native_NativeLib_extractPayload<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload_path: JString<'local>,
+    output_dir: JString<'local>,
+) -> jstring {
+    init_logger();
+    log::info!("extractPayload called");
+
+    // Extract path strings from JNI
+    let payload_path_str: String = match env.get_string(&payload_path) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("Failed to get payload path: {:?}", e);
+            let error_json = r#"{"status":"error","message":"Failed to get payload path"}"#;
+            return match env.new_string(error_json) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+        }
+    };
+
+    let output_dir_str: String = match env.get_string(&output_dir) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("Failed to get output dir: {:?}", e);
+            let error_json = r#"{"status":"error","message":"Failed to get output directory"}"#;
+            return match env.new_string(error_json) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+        }
+    };
+
+    log::info!("Extracting payload: {} -> {}", payload_path_str, output_dir_str);
+
+    // Call the extraction function
+    let result = match payload::extract_payload_json(&payload_path_str, &output_dir_str) {
+        Ok(json) => json,
+        Err(e) => {
+            log::error!("Payload extraction failed: {}", e);
+            format!(r#"{{"status":"error","message":"{}"}}"#, e.replace('"', "'"))
+        }
+    };
+
+    match env.new_string(&result) {
+        Ok(output) => output.into_raw(),
+        Err(e) => {
+            log::error!("Failed to create result string: {:?}", e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// JNI Function: Library initialization
 /// Called when System.loadLibrary() is executed
 #[unsafe(no_mangle)]
