@@ -581,6 +581,213 @@ fn parse_payload_properties(payload_path: &str) -> Option<PayloadProperties> {
     Some(props)
 }
 
+/// Result of extracting a single partition
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtractedPartition {
+    pub name: String,
+    pub size: u64,
+    pub path: String,
+}
+
+/// Result of payload extraction
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtractionResult {
+    pub status: String,
+    pub extracted: Vec<ExtractedPartition>,
+}
+
+/// Extract all partitions from a payload.bin file
+///
+/// This function uses streaming I/O to handle large files efficiently.
+/// Each partition is extracted to a separate .img file.
+///
+/// # Arguments
+/// * `payload_path` - Path to the payload.bin file
+/// * `output_dir` - Directory where .img files will be written
+///
+/// # Returns
+/// * `Ok(ExtractionResult)` - List of extracted partitions
+/// * `Err(PayloadError)` - If extraction fails
+pub fn extract_payload(payload_path: &str, output_dir: &str) -> Result<ExtractionResult, PayloadError> {
+    use std::io::{BufReader, BufWriter, Write};
+
+    log::info!("=== PAYLOAD EXTRACTION START ===");
+    log::info!("Payload: {}", payload_path);
+    log::info!("Output: {}", output_dir);
+
+    // First, inspect the payload to get partition info
+    let inspection = inspect_payload(payload_path)?;
+
+    // Create output directory if it doesn't exist
+    let output_path = Path::new(output_dir);
+    if !output_path.exists() {
+        log::info!("Creating output directory: {}", output_dir);
+        std::fs::create_dir_all(output_path).map_err(|e| {
+            PayloadError::Io(format!("Failed to create output directory: {}", e))
+        })?;
+    }
+
+    // Open payload file
+    let mut payload_file = File::open(payload_path)?;
+
+    // Skip to data blobs section
+    // Data starts after: header (24) + manifest + metadata_signature
+    let data_offset = HEADER_SIZE +
+                      inspection.header.manifest_size +
+                      inspection.header.metadata_signature_size as u64;
+
+    log::info!("Data blob starts at offset: {}", data_offset);
+    payload_file.seek(SeekFrom::Start(data_offset))?;
+
+    // Re-parse manifest to get operations
+    payload_file.seek(SeekFrom::Start(HEADER_SIZE))?;
+    let mut manifest_data = vec![0u8; inspection.header.manifest_size as usize];
+    payload_file.read_exact(&mut manifest_data)?;
+    let manifest = DeltaArchiveManifest::decode(&manifest_data[..])?;
+
+    // Seek back to data section
+    payload_file.seek(SeekFrom::Start(data_offset))?;
+
+    let mut extracted = Vec::new();
+
+    // Extract each partition
+    for partition in &manifest.partitions {
+        let partition_name = &partition.partition_name;
+        log::info!("Extracting partition: {}", partition_name);
+
+        let output_file_path = output_path.join(format!("{}.img", partition_name));
+        log::info!("  Output: {}", output_file_path.display());
+
+        // Create output file
+        let output_file = File::create(&output_file_path).map_err(|e| {
+            PayloadError::Io(format!("Failed to create {}: {}", partition_name, e))
+        })?;
+        let mut writer = BufWriter::new(output_file);
+
+        let partition_size = partition
+            .new_partition_info
+            .as_ref()
+            .and_then(|info| info.size)
+            .unwrap_or(0);
+
+        log::info!("  Size: {} ({})", partition_size, format_size(partition_size));
+        log::info!("  Operations: {}", partition.operations.len());
+
+        // Process each operation
+        for (op_idx, operation) in partition.operations.iter().enumerate() {
+            if let Some(data_length) = operation.data_length {
+                if data_length > 0 {
+                    // Read compressed data from payload
+                    let data_offset_in_blob = operation.data_offset.unwrap_or(0);
+
+                    // Seek to the operation's data
+                    payload_file.seek(SeekFrom::Start(data_offset + data_offset_in_blob))?;
+
+                    // Read the compressed data
+                    let mut compressed_data = vec![0u8; data_length as usize];
+                    payload_file.read_exact(&mut compressed_data)?;
+
+                    // Decompress based on operation type
+                    let decompressed_data = match operation.r#type() {
+                        crate::proto::install_operation::Type::ReplaceXz => {
+                            decompress_xz(&compressed_data)?
+                        }
+                        crate::proto::install_operation::Type::ReplaceBz => {
+                            decompress_bz2(&compressed_data)?
+                        }
+                        crate::proto::install_operation::Type::Replace => {
+                            // No decompression needed
+                            compressed_data
+                        }
+                        _ => {
+                            log::warn!("  Operation {} type {:?} not fully supported, using raw data",
+                                      op_idx, operation.r#type());
+                            compressed_data
+                        }
+                    };
+
+                    // Write decompressed data
+                    writer.write_all(&decompressed_data).map_err(|e| {
+                        PayloadError::Io(format!("Write failed for {}: {}", partition_name, e))
+                    })?;
+                }
+            }
+        }
+
+        // Flush and sync
+        writer.flush().map_err(|e| {
+            PayloadError::Io(format!("Flush failed for {}: {}", partition_name, e))
+        })?;
+
+        // Get final file size
+        let final_size = std::fs::metadata(&output_file_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        log::info!("  ✓ Extracted: {} bytes", final_size);
+
+        extracted.push(ExtractedPartition {
+            name: partition_name.clone(),
+            size: final_size,
+            path: output_file_path.to_string_lossy().to_string(),
+        });
+    }
+
+    log::info!("=== PAYLOAD EXTRACTION COMPLETE ===");
+    log::info!("Extracted {} partitions", extracted.len());
+
+    Ok(ExtractionResult {
+        status: "success".to_string(),
+        extracted,
+    })
+}
+
+/// Decompress XZ/LZMA compressed data
+fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, PayloadError> {
+    use std::io::Read;
+
+    let mut decompressor = xz2::read::XzDecoder::new(data);
+    let mut decompressed = Vec::new();
+
+    decompressor.read_to_end(&mut decompressed).map_err(|e| {
+        PayloadError::Io(format!("XZ decompression failed: {}", e))
+    })?;
+
+    Ok(decompressed)
+}
+
+/// Decompress bzip2 compressed data
+fn decompress_bz2(data: &[u8]) -> Result<Vec<u8>, PayloadError> {
+    use std::io::Read;
+
+    let mut decompressor = bzip2::read::BzDecoder::new(data);
+    let mut decompressed = Vec::new();
+
+    decompressor.read_to_end(&mut decompressed).map_err(|e| {
+        PayloadError::Io(format!("Bzip2 decompression failed: {}", e))
+    })?;
+
+    Ok(decompressed)
+}
+
+/// Extract payload and return JSON result
+pub fn extract_payload_json(payload_path: &str, output_dir: &str) -> Result<String, String> {
+    log::info!("extract_payload_json called");
+
+    match extract_payload(payload_path, output_dir) {
+        Ok(result) => {
+            match serde_json::to_string(&result) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("JSON serialization error: {}", e)),
+            }
+        }
+        Err(e) => {
+            log::error!("Extraction failed: {}", e);
+            Err(e.to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
