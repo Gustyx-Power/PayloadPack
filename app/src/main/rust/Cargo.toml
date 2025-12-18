@@ -30,6 +30,10 @@ serde_json = "1.0"
 # Byte order handling for reading binary data
 byteorder = "1.5"
 
+# Decompression libraries
+xz2 = "0.1"
+bzip2 = "0.4"
+
 [build-dependencies]
 # Protobuf code generation at build time
 prost-build = "0.13"
