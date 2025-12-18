@@ -182,12 +182,13 @@ pub extern "system" fn Java_id_xms_payloadpack_native_NativeLib_inspectPayload<'
 ///
 /// # JNI Signature
 /// ```
-/// public static native String extractPayload(String payloadPath, String outputDir);
+/// public static native String extractPayload(String payloadPath, String outputDir, ProgressListener listener);
 /// ```
 ///
 /// # Arguments
 /// * `payloadPath` - Path to the payload.bin file
 /// * `outputDir` - Directory where .img files will be written
+/// * `progressListener` - Optional callback for progress updates
 ///
 /// # Returns
 /// * JSON string with status and result
@@ -219,6 +220,7 @@ pub extern "system" fn Java_id_xms_payloadpack_native_NativeLib_extractPayload<'
     _class: JClass<'local>,
     payload_path: JString<'local>,
     output_dir: JString<'local>,
+    progress_listener: jni::sys::jobject,
 ) -> jstring {
     init_logger();
     log::info!("extractPayload called");
@@ -250,8 +252,76 @@ pub extern "system" fn Java_id_xms_payloadpack_native_NativeLib_extractPayload<'
 
     log::info!("Extracting payload: {} -> {}", payload_path_str, output_dir_str);
 
-    // Call the extraction function
-    let result = match payload::extract_payload_json(&payload_path_str, &output_dir_str) {
+    // Create a progress callback closure
+    let progress_callback: Option<Box<dyn Fn(&str, i32, i64, i64) + Send>> = if !progress_listener.is_null() {
+        // Convert jobject to GlobalRef to keep it alive across calls
+        let listener_global = match env.new_global_ref(unsafe { jni::objects::JObject::from_raw(progress_listener) }) {
+            Ok(global) => global,
+            Err(e) => {
+                log::error!("Failed to create global ref for listener: {:?}", e);
+                let error_json = r#"{"status":"error","message":"Failed to create global ref for listener"}"#;
+                return match env.new_string(error_json) {
+                    Ok(s) => s.into_raw(),
+                    Err(_) => std::ptr::null_mut(),
+                };
+            }
+        };
+
+        // Get JavaVM to attach thread for callbacks
+        let jvm = match env.get_java_vm() {
+            Ok(vm) => vm,
+            Err(e) => {
+                log::error!("Failed to get JavaVM: {:?}", e);
+                let error_json = r#"{"status":"error","message":"Failed to get JavaVM"}"#;
+                return match env.new_string(error_json) {
+                    Ok(s) => s.into_raw(),
+                    Err(_) => std::ptr::null_mut(),
+                };
+            }
+        };
+
+        Some(Box::new(move |current_file: &str, progress: i32, bytes_processed: i64, total_bytes: i64| {
+            // Attach current thread to JVM (safe to call multiple times)
+            let mut env = match jvm.attach_current_thread() {
+                Ok(env) => env,
+                Err(e) => {
+                    log::error!("Failed to attach thread: {:?}", e);
+                    return;
+                }
+            };
+
+            // Create Java string for current file
+            let j_current_file = match env.new_string(current_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Failed to create string: {:?}", e);
+                    return;
+                }
+            };
+
+            // Call onProgress method
+            let result = env.call_method(
+                listener_global.as_obj(),
+                "onProgress",
+                "(Ljava/lang/String;IJJ)V",
+                &[
+                    jni::objects::JValue::Object(&j_current_file),
+                    jni::objects::JValue::Int(progress),
+                    jni::objects::JValue::Long(bytes_processed),
+                    jni::objects::JValue::Long(total_bytes),
+                ],
+            );
+
+            if let Err(e) = result {
+                log::error!("Failed to call onProgress: {:?}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Call the extraction function with progress callback
+    let result = match payload::extract_payload_json(&payload_path_str, &output_dir_str, progress_callback) {
         Ok(json) => json,
         Err(e) => {
             log::error!("Payload extraction failed: {}", e);
