@@ -1,3 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- App Identity -->
     <string name="app_name">PayloadPack</string>
+    <string name="app_subtitle">ROM Unpacker / Repacker</string>
+    <string name="app_tagline">Extract and repack Android ROM images with ease</string>
+
+    <!-- Navigation & Actions -->
+    <string name="action_select_file">Select File</string>
+    <string name="action_pick_file">Pick File</string>
+    <string name="action_unpack">Unpack</string>
+    <string name="action_repack">Repack</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_close">Close</string>
+    <string name="action_continue">Continue</string>
+    <string name="action_extract_all">Extract All</string>
+    <string name="action_extract_selected">Extract Selected</string>
+
+    <!-- Root & Initialization -->
+    <string name="init_checking">Checking environment…</string>
+    <string name="init_requesting_root">Requesting Root Access</string>
+    <string name="init_requesting_root_desc">Please grant root permission in the popup</string>
+    <string name="init_root_denied">Root Access Denied</string>
+    <string name="init_root_denied_desc">This app requires root access to function properly.\nIt needs to access /data for preserving Linux file attributes.</string>
+    <string name="init_workspace">Initializing Workspace</string>
+    <string name="init_workspace_desc">Creating directories…</string>
+    <string name="init_ready">Ready!</string>
+    <string name="init_ready_desc">Workspace initialized successfully</string>
+    <string name="init_error">Initialization Failed</string>
+    <string name="please_wait">Please wait</string>
+
+    <!-- Storage Labels -->
+    <string name="storage_user">User Storage</string>
+    <string name="storage_user_desc">Input/Output files</string>
+    <string name="storage_work">Work Storage</string>
+    <string name="storage_work_desc">Full Linux attributes (symlinks, permissions)</string>
+    <string name="storage_locations">Storage Locations</string>
+
+    <!-- Status Messages -->
+    <string name="status_idle">Idle</string>
+    <string name="status_analyzing">Analyzing…</string>
+    <string name="status_processing">Processing…</string>
+    <string name="status_extracting">Extracting…</string>
+    <string name="status_repacking">Repacking…</string>
+    <string name="status_done">Done</string>
+    <string name="status_error">Error</string>
+    <string name="status_ready">System Ready</string>
+
+    <!-- Empty State -->
+    <string name="empty_title">No Payload Selected</string>
+    <string name="empty_description">Select a payload.bin file from your storage to begin extracting partitions</string>
+    <string name="empty_hint">Supported: OTA payload.bin files</string>
+
+    <!-- Payload Information -->
+    <string name="payload_info">Payload Information</string>
+    <string name="payload_version">Version</string>
+    <string name="payload_block_size">Block Size</string>
+    <string name="payload_partitions">Partitions</string>
+    <string name="payload_total_size">Total Size</string>
+    <string name="payload_partial">Partial Update</string>
+    <string name="payload_security_patch">Security Patch</string>
+
+    <!-- Partition Info -->
+    <string name="partition_size">Size: %1$s</string>
+    <string name="partition_hash">Hash: %1$s</string>
+    <string name="partition_operations">%1$d operations</string>
+    <string name="partition_count">%1$d partitions</string>
+
+    <!-- Partition Attributes -->
+    <string name="attr_erofs">EROFS</string>
+    <string name="attr_ext4">EXT4</string>
+    <string name="attr_readonly">Read-Only</string>
+    <string name="attr_sparse">Sparse</string>
+    <string name="attr_compressed">Compressed</string>
+
+    <!-- System Info -->
+    <string name="native_engine">Native Engine</string>
+    <string name="work_storage_available">Work Storage: %1$s available</string>
+
+    <!-- Errors -->
+    <string name="error_file_not_found">File not found</string>
+    <string name="error_invalid_payload">Invalid payload format</string>
+    <string name="error_parse_failed">Failed to parse payload</string>
+    <string name="error_permission_denied">Permission denied</string>
+    <string name="error_disk_full">Insufficient disk space</string>
+    <string name="error_unknown">An unknown error occurred</string>
+
+    <!-- Confirmation -->
+    <string name="confirm_extract_title">Extract Partitions?</string>
+    <string name="confirm_extract_message">This will extract %1$d partitions to the work directory.</string>
+
+    <!-- Coming Soon -->
+    <string name="coming_soon">Soon</string>
+    <string name="feature_extractor">Payload Extractor</string>
+    <string name="feature_extractor_desc">Extract payload.bin from OTA packages</string>
+    <string name="feature_unpacker">Image Unpacker</string>
+    <string name="feature_unpacker_desc">Unpack system, vendor, product images</string>
+    <string name="feature_repacker">Image Repacker</string>
+    <string name="feature_repacker_desc">Repack modified images back to flashable format</string>
+
+    <!-- Accessibility -->
+    <string name="cd_partition_icon">Partition icon</string>
+    <string name="cd_status_icon">Status icon</string>
+    <string name="cd_close">Close</string>
+    <string name="cd_menu">Menu</string>
 </resources>
