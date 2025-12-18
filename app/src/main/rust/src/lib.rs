@@ -8,6 +8,10 @@ use jni::sys::jstring;
 use jni::JNIEnv;
 use thiserror::Error;
 
+// Payload parsing module
+mod proto;
+mod payload;
+
 /// Custom error types for PayloadPack native operations
 #[derive(Error, Debug)]
 pub enum PayloadPackError {
@@ -105,6 +109,67 @@ pub extern "system" fn Java_id_xms_payloadpack_native_NativeLib_processMessage<'
         Ok(output) => output.into_raw(),
         Err(e) => {
             log::error!("Failed to create output string: {:?}", e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// JNI Function: Inspect a payload.bin file
+///
+/// Parses the payload header and manifest to extract partition information.
+/// Memory-efficient: only reads header and manifest, not the entire file.
+///
+/// # JNI Signature
+/// ```
+/// public static native String inspectPayload(String path);
+/// ```
+///
+/// # Arguments
+/// * `path` - Path to the payload.bin file
+///
+/// # Returns
+/// * JSON string with payload information on success
+/// * JSON object with "error" field on failure
+///
+/// # Safety
+/// This function is called from the JVM and must not panic.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_id_xms_payloadpack_native_NativeLib_inspectPayload<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jstring {
+    init_logger();
+    log::info!("inspectPayload called");
+
+    // Extract the path string from JNI
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("Failed to get path string: {:?}", e);
+            let error_json = r#"{"error": "Failed to get path string"}"#;
+            return match env.new_string(error_json) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+        }
+    };
+
+    log::info!("Inspecting payload: {}", path_str);
+
+    // Call the payload inspection function
+    let result = match payload::inspect_payload_json(&path_str) {
+        Ok(json) => json,
+        Err(e) => {
+            log::error!("Payload inspection failed: {}", e);
+            format!(r#"{{"error": "{}"}}"#, e.replace('"', "'"))
+        }
+    };
+
+    match env.new_string(&result) {
+        Ok(output) => output.into_raw(),
+        Err(e) => {
+            log::error!("Failed to create result string: {:?}", e);
             std::ptr::null_mut()
         }
     }
