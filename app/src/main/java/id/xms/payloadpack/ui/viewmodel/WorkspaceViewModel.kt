@@ -346,24 +346,37 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                         extractF2fsImage(imgFile, extractedFolder)
                     }
                     FilesystemType.UNKNOWN -> {
-                        Log.w(TAG, "Unknown filesystem type, creating placeholder")
-                        extractPlaceholder(extractedFolder, "UNKNOWN")
-                        false
+                        // Modern Android partitions are usually EROFS, try it as fallback
+                        Log.w(TAG, "Unknown filesystem type, trying EROFS extraction as fallback...")
+                        logFileMagicBytes(imgFile)
+                        
+                        // Try EROFS first (most common for modern ROMs)
+                        val erofsSuccess = extractErofsImage(imgFile, extractedFolder)
+                        if (erofsSuccess) {
+                            Log.d(TAG, "EROFS fallback extraction succeeded!")
+                            true
+                        } else {
+                            // Try EXT4 as second fallback
+                            Log.d(TAG, "EROFS failed, trying EXT4...")
+                            val ext4Success = extractExt4Image(imgFile, extractedFolder)
+                            if (ext4Success) {
+                                Log.d(TAG, "EXT4 fallback extraction succeeded!")
+                                true
+                            } else {
+                                setExtractionError("Could not extract ${partition.name}. Tried EROFS and EXT4.")
+                                false
+                            }
+                        }
                     }
                 }
 
-                if (!success) {
-                    withContext(Dispatchers.Main) {
-                        _uiState.value = _uiState.value.copy(
-                            errorMessage = "Extraction failed for ${partition.name}. Check binaries or filesystem type."
-                        )
-                    }
-                }
+                // Update extraction state
+                updatePartitionState(partition.name, isExtracting = false)
 
                 // Refresh partition list
                 loadExtractedPartitions()
 
-                Log.d(TAG, "Extraction complete: ${partition.name} (success: $success)")
+                Log.d(TAG, "Extraction complete: ${partition.name} (success: $success, fsType: $fsType)")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Extraction failed: ${e.message}", e)
@@ -399,32 +412,82 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
      */
     private fun detectFilesystemType(imgFile: File): FilesystemType {
         try {
-            val buffer = ByteArray(8192)
-            imgFile.inputStream().use { input ->
-                input.read(buffer)
+            // First try direct read (works for files in external storage)
+            var buffer: ByteArray? = null
+            
+            try {
+                buffer = ByteArray(8192)
+                imgFile.inputStream().use { input ->
+                    val bytesRead = input.read(buffer)
+                    Log.d(TAG, "Direct read: $bytesRead bytes from ${imgFile.name}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Direct read failed, trying root: ${e.message}")
+                buffer = null
             }
+            
+            // If direct read failed, use root shell
+            if (buffer == null || buffer.all { it == 0.toByte() }) {
+                Log.d(TAG, "Using root shell to read file header...")
+                buffer = readFileHeaderWithRoot(imgFile.absolutePath, 8192)
+            }
+            
+            if (buffer == null || buffer.isEmpty()) {
+                Log.e(TAG, "Failed to read file header")
+                return FilesystemType.UNKNOWN
+            }
+            
+            // Log first 16 bytes for debugging
+            val hexFirst16 = buffer.take(16).joinToString(" ") { "%02X".format(it) }
+            Log.d(TAG, "Magic bytes (first 16): $hexFirst16")
 
             // Check for Android boot image magic ("ANDROID!" at offset 0)
             if (buffer.size > 8) {
                 val bootSignature = String(buffer, 0, 8, Charsets.US_ASCII)
                 if (bootSignature == "ANDROID!") {
+                    Log.d(TAG, "Detected: BOOT image")
                     return FilesystemType.BOOT
                 }
             }
+            
+            // Check for Sparse image magic (0x3AFF26ED at offset 0) - need to handle this!
+            if (buffer.size > 4) {
+                val sparseMagic = ((buffer[0].toInt() and 0xFF)) or
+                                 ((buffer[1].toInt() and 0xFF) shl 8) or
+                                 ((buffer[2].toInt() and 0xFF) shl 16) or
+                                 ((buffer[3].toInt() and 0xFF) shl 24)
+                if (sparseMagic == 0x3AFF26ED.toInt()) {
+                    Log.d(TAG, "Detected: Sparse image (treating as EXT4)")
+                    return FilesystemType.EXT4  // Sparse images are usually EXT4
+                }
+            }
 
-            // Check for EXT4 magic (0x53EF at offset 0x438)
+            // Check for EXT4 magic (0xEF53 at offset 0x438)
+            // Magic is stored as little-endian: [0x53, 0xEF] in file
             if (buffer.size > 0x438 + 2) {
                 val magic = ((buffer[0x438 + 1].toInt() and 0xFF) shl 8) or
                            (buffer[0x438].toInt() and 0xFF)
-                if (magic == 0x53EF) {
+                Log.d(TAG, "EXT4 magic check at 0x438: 0x${magic.toString(16).uppercase()}")
+                if (magic == 0xEF53) {  // Fixed: was incorrectly 0x53EF
+                    Log.d(TAG, "Detected: EXT4")
                     return FilesystemType.EXT4
                 }
             }
 
-            // Check for EROFS magic ("E2ROFS" at offset 0x400)
-            if (buffer.size > 0x400 + 6) {
-                val erofsSignature = String(buffer, 0x400, 6, Charsets.US_ASCII)
-                if (erofsSignature.startsWith("E2RO")) {
+            // Check for EROFS magic (0xE0F5E1E2 at offset 0x400)
+            if (buffer.size > 0x400 + 4) {
+                val erofsMagic = ((buffer[0x400].toInt() and 0xFF)) or
+                               ((buffer[0x401].toInt() and 0xFF) shl 8) or
+                               ((buffer[0x402].toInt() and 0xFF) shl 16) or
+                               ((buffer[0x403].toInt() and 0xFF) shl 24)
+                
+                val hex0x400 = buffer.slice(0x400 until minOf(0x408, buffer.size))
+                    .joinToString(" ") { "%02X".format(it) }
+                Log.d(TAG, "Bytes at 0x400: $hex0x400 (parsed: 0x${erofsMagic.toUInt().toString(16).uppercase()})")
+                
+                // EROFS magic: 0xE0F5E1E2 (little-endian)
+                if (erofsMagic == 0xE0F5E1E2.toInt()) {
+                    Log.d(TAG, "Detected: EROFS")
                     return FilesystemType.EROFS
                 }
             }
@@ -436,38 +499,153 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                                ((buffer[0x402].toInt() and 0xFF) shl 16) or
                                ((buffer[0x403].toInt() and 0xFF) shl 24)
                 if (f2fsMagic.toLong() == 0xF2F52010L) {
+                    Log.d(TAG, "Detected: F2FS")
                     return FilesystemType.F2FS
                 }
             }
 
+            Log.w(TAG, "Could not detect filesystem type")
             return FilesystemType.UNKNOWN
         } catch (e: Exception) {
-            Log.e(TAG, "Error detecting filesystem: ${e.message}")
+            Log.e(TAG, "Error detecting filesystem: ${e.message}", e)
             return FilesystemType.UNKNOWN
+        }
+    }
+    
+    /**
+     * Read file header using root shell (for files in /data).
+     */
+    private fun readFileHeaderWithRoot(filePath: String, bytes: Int): ByteArray? {
+        return try {
+            // Use dd to read first N bytes and base64 encode for safe transfer
+            val result = Shell.cmd(
+                "dd if='$filePath' bs=1 count=$bytes 2>/dev/null | base64"
+            ).exec()
+            
+            if (result.isSuccess && result.out.isNotEmpty()) {
+                val base64Data = result.out.joinToString("")
+                val decoded = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+                Log.d(TAG, "Root read successful: ${decoded.size} bytes")
+                decoded
+            } else {
+                Log.e(TAG, "Root read failed: ${result.err}")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading with root: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Log raw magic bytes for debugging unknown filesystem types.
+     */
+    private fun logFileMagicBytes(imgFile: File) {
+        try {
+            val buffer = ByteArray(16)
+            imgFile.inputStream().use { it.read(buffer) }
+            
+            val hexString = buffer.joinToString(" ") { "%02X".format(it) }
+            Log.d(TAG, "File magic bytes (first 16): $hexString")
+            
+            // Also check offset 0x400 where EROFS/F2FS magic is
+            val buffer0x400 = ByteArray(8)
+            imgFile.inputStream().use { input ->
+                input.skip(0x400)
+                input.read(buffer0x400)
+            }
+            val hex0x400 = buffer0x400.joinToString(" ") { "%02X".format(it) }
+            Log.d(TAG, "File magic bytes at 0x400: $hex0x400")
+            
+            // Check offset 0x438 for EXT4
+            val buffer0x438 = ByteArray(4)
+            imgFile.inputStream().use { input ->
+                input.skip(0x438)
+                input.read(buffer0x438)
+            }
+            val hex0x438 = buffer0x438.joinToString(" ") { "%02X".format(it) }
+            Log.d(TAG, "File magic bytes at 0x438 (EXT4): $hex0x438")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading magic bytes: ${e.message}")
         }
     }
 
     /**
-     * Extract EROFS image using fsck.erofs binary.
+     * Extract EROFS image using erofs-utils binaries.
+     * Tries extract.erofs first, then fsck.erofs --extract.
      */
-    private fun extractErofsImage(imgFile: File, outputFolder: File): Boolean {
-        return try {
-            val success = id.xms.payloadpack.core.BinaryManager.extractErofs(
-                imgFile.absolutePath,
-                outputFolder.absolutePath
-            )
-
-            if (success) {
+    private suspend fun extractErofsImage(imgFile: File, outputFolder: File): Boolean {
+        val binPath = id.xms.payloadpack.core.BinaryManager.getBinPath()
+        if (binPath == null) {
+            Log.e(TAG, "BinaryManager not initialized")
+            return false
+        }
+        
+        // Method 1: Try extract.erofs (preferred for extraction)
+        if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("extract.erofs")) {
+            Log.d(TAG, "Trying extract.erofs...")
+            
+            // Use root shell for files in /data
+            val result = Shell.cmd(
+                "'$binPath/extract.erofs' -i '${imgFile.absolutePath}' -x -T8 '${outputFolder.absolutePath}'"
+            ).exec()
+            
+            if (result.isSuccess) {
                 Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
-                Log.d(TAG, "EROFS extraction successful")
+                Log.d(TAG, "extract.erofs successful")
+                result.out.forEach { Log.d(TAG, "  $it") }
+                return true
             } else {
-                Log.e(TAG, "EROFS extraction failed - binary may be missing")
+                Log.w(TAG, "extract.erofs failed: ${result.err}")
             }
-
-            success
-        } catch (e: Exception) {
-            Log.e(TAG, "Error extracting EROFS: ${e.message}", e)
-            false
+        }
+        
+        // Method 2: Try fsck.erofs --extract
+        if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("fsck.erofs")) {
+            Log.d(TAG, "Trying fsck.erofs --extract...")
+            
+            // Use root shell for files in /data
+            val result = Shell.cmd(
+                "'$binPath/fsck.erofs' --extract='${outputFolder.absolutePath}' '${imgFile.absolutePath}'"
+            ).exec()
+            
+            if (result.isSuccess) {
+                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
+                Log.d(TAG, "fsck.erofs extraction successful")
+                result.out.forEach { Log.d(TAG, "  $it") }
+                return true
+            } else {
+                Log.w(TAG, "fsck.erofs failed:")
+                result.err.forEach { Log.e(TAG, "  $it") }
+                result.out.forEach { Log.e(TAG, "  $it") }
+            }
+        }
+        
+        // Method 3: Try dump.erofs to at least verify it's a valid EROFS image
+        if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("dump.erofs")) {
+            Log.d(TAG, "Checking with dump.erofs...")
+            val dumpResult = Shell.cmd(
+                "'$binPath/dump.erofs' '${imgFile.absolutePath}'"
+            ).exec()
+            
+            Log.d(TAG, "dump.erofs output:")
+            dumpResult.out.forEach { Log.d(TAG, "  $it") }
+            dumpResult.err.forEach { Log.e(TAG, "  $it") }
+        }
+        
+        Log.e(TAG, "All EROFS extraction methods failed")
+        return false
+    }
+    
+    /**
+     * Helper to set extraction error message
+     */
+    private suspend fun setExtractionError(message: String) {
+        withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+                errorMessage = message
+            )
         }
     }
 

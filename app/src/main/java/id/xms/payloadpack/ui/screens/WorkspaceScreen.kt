@@ -845,7 +845,7 @@ private fun PartitionCard(
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                         ) {
                             Text(
-                                text = "Open",
+                                text = "Repack",
                                 style = MaterialTheme.typography.labelSmall
                             )
                         }
