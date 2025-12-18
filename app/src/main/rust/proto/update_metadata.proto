@@ -1,0 +1,239 @@
+// Copyright 2015 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Update file format: An update file contains all the operations needed
+// to update a system to a specific version. The update format is:
+//
+// +-------+------------------+--------------------------------+
+// |CrAU   |HeaderSize (8)    |  Manifest  |  Metadata Sig  |
+// +-------+------------------+--------------------------------+
+//
+// The Header is defined below, followed by the Manifest (a serialized
+// DeltaArchiveManifest message with all the operations to apply).
+
+syntax = "proto2";
+
+option optimize_for = LITE_RUNTIME;
+
+package chromeos_update_engine;
+
+// Data is packed into blocks on disk, always starting from the beginning
+// of the block. If data is too short to fill an entire block, padding
+// is added at the end.
+
+message Extent {
+  optional uint64 start_block = 1;
+  optional uint64 num_blocks = 2;
+}
+
+// Signatures: Updates may be signed by the OS vendor. The client verifies
+// an update's signature before applying.
+
+message Signatures {
+  message Signature {
+    optional uint32 version = 1 [deprecated = true];
+    optional bytes data = 2;
+    optional uint32 unpadded_signature_size = 3;
+  }
+  repeated Signature signatures = 1;
+}
+
+message PartitionInfo {
+  optional uint64 size = 1;
+  optional bytes hash = 2;
+}
+
+// Describe an image we're going to install (like system.img)
+message InstallOperation {
+  enum Type {
+    REPLACE = 0;
+    REPLACE_BZ = 1;
+    MOVE = 2 [deprecated = true];
+    BSDIFF = 3 [deprecated = true];
+    SOURCE_COPY = 4;
+    SOURCE_BSDIFF = 5;
+    REPLACE_XZ = 8;
+    ZERO = 6;
+    DISCARD = 7;
+    BROTLI_BSDIFF = 10;
+    PUFFDIFF = 9;
+    ZUCCHINI = 11;
+    LZ4DIFF_BSDIFF = 12;
+    LZ4DIFF_PUFFDIFF = 13;
+  }
+  required Type type = 1;
+
+  // Offset of the data blob for this operation in the update file.
+  optional uint64 data_offset = 2;
+
+  // Length of the data blob for this operation in the update file.
+  optional uint64 data_length = 3;
+
+  // Ordered list of extents that are read from (if any) and written to.
+  repeated Extent src_extents = 4;
+
+  // Byte length of src, equal to the number of blocks in src_extents *
+  // block_size. It is used to clarify the meaning of src_sha256_hash.
+  optional uint64 src_length = 5;
+
+  repeated Extent dst_extents = 6;
+
+  // Byte length of dst, equal to the number of blocks in dst_extents *
+  // block_size. It is used to clarify the meaning of dst_sha256_hash.
+  optional uint64 dst_length = 7;
+
+  // Optional hash of the data blob in this operation.
+  optional bytes data_sha256_hash = 8;
+
+  // Optional hash of the data read (if any).
+  // For SOURCE_COPY, this is the hash of the data read from the source.
+  optional bytes src_sha256_hash = 9;
+}
+
+// Describes the update to apply to a single partition.
+message PartitionUpdate {
+  // A platform-specific name to identify the partition set being updated.
+  required string partition_name = 1;
+
+  // Signature of the new partition.
+  optional PartitionInfo new_partition_info = 7;
+
+  // Install operations.
+  repeated InstallOperation operations = 8;
+
+  // Old partition info: ignored.
+  optional PartitionInfo old_partition_info = 6 [deprecated = true];
+
+  // Whether the updater should only do source hash verification.
+  // Only for incremental updates.
+  optional bool run_postinstall = 4 [deprecated = true];
+  optional string postinstall_path = 5 [deprecated = true];
+  optional string filesystem_type = 6 [deprecated = true];
+
+  // Additional fields for VABC
+  optional bool estimate_cow_size = 14;
+  optional uint64 estimate_op_count_max = 15;
+
+  // Hash tree and FEC configuration for dm-verity
+  optional uint64 hash_tree_data_extent_start_block = 20;
+  optional uint64 hash_tree_data_extent_num_blocks = 21;
+  optional uint64 hash_tree_extent_start_block = 22;
+  optional uint64 hash_tree_extent_num_blocks = 23;
+  optional bytes hash_tree_algorithm = 24;
+  optional bytes hash_tree_salt = 25;
+
+  optional uint64 fec_data_extent_start_block = 26;
+  optional uint64 fec_data_extent_num_blocks = 27;
+  optional uint64 fec_extent_start_block = 28;
+  optional uint64 fec_extent_num_blocks = 29;
+  optional uint32 fec_roots = 30;
+
+  // Version of the partition after the update. How this is interpreted
+  // is specific to each partition type.
+  optional string version = 31;
+}
+
+message DynamicPartitionGroup {
+  // Name of the group. This is a unique identifier for the group.
+  required string name = 1;
+
+  // Maximum size of the group. The sum of all partition sizes in the
+  // group must not exceed this value.
+  optional uint64 size = 2;
+
+  // List of partition names that belong to the group.
+  repeated string partition_names = 3;
+}
+
+message DynamicPartitionMetadata {
+  // Groups of dynamic partitions.
+  repeated DynamicPartitionGroup groups = 1;
+
+  // Whether the metadata is for a snapshot update.
+  optional bool snapshot_enabled = 2;
+
+  // If snapshot is enabled, the size of the /data partition required
+  // to be able to do the snapshot update.
+  optional bool vabc_enabled = 3;
+
+  optional string vabc_compression_param = 4;
+
+  optional uint32 cow_version = 5;
+}
+
+message ApexInfo {
+  optional string package_name = 1;
+  optional int64 version = 2;
+  optional bool is_compressed = 3;
+  optional int64 decompressed_size = 4;
+}
+
+message ApexMetadata {
+  repeated ApexInfo apex_info = 1;
+}
+
+// The main message, describing the entire update manifest.
+message DeltaArchiveManifest {
+  // Install operations for the kernel and rootfs partitions.
+  // deprecated: install_operations and kernel_install_operations are
+  // deprecated in favor of partitions.
+  repeated InstallOperation install_operations = 1 [deprecated = true];
+  repeated InstallOperation kernel_install_operations = 2 [deprecated = true];
+
+  // Block size used. 4096.
+  optional uint32 block_size = 3 [default = 4096];
+
+  // Signature of the manifest in the header.
+  optional bytes signature_manifest = 4 [deprecated = true];
+
+  // Old kernel info: ignored.
+  optional PartitionInfo old_kernel_info = 5 [deprecated = true];
+  optional PartitionInfo new_kernel_info = 6 [deprecated = true];
+  optional PartitionInfo old_rootfs_info = 7 [deprecated = true];
+  optional PartitionInfo new_rootfs_info = 8 [deprecated = true];
+
+  // Old image info: ignored.
+  optional ImageInfo old_image_info = 9 [deprecated = true];
+  optional ImageInfo new_image_info = 10 [deprecated = true];
+
+  // Minimum versions
+  optional uint32 minor_version = 12 [default = 0];
+
+  // List of partition updates.
+  repeated PartitionUpdate partitions = 13;
+
+  // Maximum timestamp allowed for the update, in seconds since Unix epoch.
+  optional int64 max_timestamp = 14;
+
+  // Metadata for dynamic partitioning.
+  optional DynamicPartitionMetadata dynamic_partition_metadata = 15;
+
+  // If the payload is partial.
+  optional bool partial_update = 16;
+
+  // APEX metadata.
+  repeated ApexInfo apex_info = 17;
+
+  // Security patch level of the update.
+  optional string security_patch_level = 18;
+}
+
+message ImageInfo {
+  optional string board = 1 [deprecated = true];
+  optional string key = 2 [deprecated = true];
+  optional string channel = 3 [deprecated = true];
+  optional string version = 4 [deprecated = true];
+  optional string build_channel = 5 [deprecated = true];
+  optional string build_version = 6 [deprecated = true];
+}
