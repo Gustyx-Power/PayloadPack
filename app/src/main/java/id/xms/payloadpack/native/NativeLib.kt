@@ -1,6 +1,21 @@
 package id.xms.payloadpack.native
 
 /**
+ * Callback interface for extraction progress updates.
+ */
+interface ProgressListener {
+    /**
+     * Called when extraction progress updates.
+     *
+     * @param currentFile Name of the file currently being processed
+     * @param progress Progress percentage (0-100)
+     * @param bytesProcessed Number of bytes processed so far
+     * @param totalBytes Total bytes to process
+     */
+    fun onProgress(currentFile: String, progress: Int, bytesProcessed: Long, totalBytes: Long)
+}
+
+/**
  * Native Library interface for PayloadPack.
  *
  * This object provides Kotlin bindings to the Rust native library.
@@ -106,6 +121,7 @@ object NativeLib {
      *
      * @param payloadPath Path to the payload.bin file
      * @param outputDir Directory where .img files will be written (created if doesn't exist)
+     * @param progressListener Callback for progress updates (can be null for no progress)
      * @return JSON string with extraction result
      *
      * Example success response:
@@ -128,5 +144,9 @@ object NativeLib {
      * ```
      */
     @JvmStatic
-    external fun extractPayload(payloadPath: String, outputDir: String): String?
+    external fun extractPayload(
+        payloadPath: String,
+        outputDir: String,
+        progressListener: ProgressListener?
+    ): String?
 }
