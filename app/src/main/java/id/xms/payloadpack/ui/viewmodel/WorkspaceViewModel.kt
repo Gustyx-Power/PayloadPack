@@ -1050,7 +1050,7 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
                 val extractedFolder = File(partition.extractedPath)
                 val projectDir = File(projectPath)
-                val outputImg = File(projectDir, "${partition.name}_repacked.img")
+                val outputImg = File(projectDir, "${partition.name}.img")
 
                 // Step 1: Restore original permissions if config exists
                 if (partition.hasPermissionConfig) {
@@ -1247,7 +1247,7 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                     
                     // Fallback to tar archive
                     addLog("Creating tar archive as fallback...")
-                    val tarOutput = File(outputImg.parent, "${partitionName}_repacked.tar.gz")
+                    val tarOutput = File(outputImg.parent, "${partitionName}.tar.gz")
                     val tarResult = Shell.cmd(
                         "cd '${sourceFolder.absolutePath}' && tar -czf '${tarOutput.absolutePath}' ."
                     ).exec()
@@ -1310,7 +1310,7 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                     
                     // Fallback to tar
                     addLog("Creating tar archive as fallback...")
-                    val tarOutput = File(outputImg.parent, "${partitionName}_repacked.tar.gz")
+                    val tarOutput = File(outputImg.parent, "${partitionName}.tar.gz")
                     val tarResult = Shell.cmd(
                         "cd '${sourceFolder.absolutePath}' && tar -czf '${tarOutput.absolutePath}' ."
                     ).exec()
