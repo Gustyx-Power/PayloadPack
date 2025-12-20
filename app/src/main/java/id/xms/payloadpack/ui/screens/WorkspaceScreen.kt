@@ -166,6 +166,9 @@ fun WorkspaceScreen(
                         onExtractPartition = { partition ->
                             viewModel.extractPartitionImage(partition)
                         },
+                        onRepackPartition = { partition ->
+                            viewModel.repackPartitionImage(partition)
+                        },
                         onOpenExtracted = { partition ->
                             viewModel.openExtractedFolder(partition)
                         },
@@ -328,12 +331,14 @@ private fun WorkspaceContent(
     uiState: id.xms.payloadpack.ui.viewmodel.WorkspaceUiState,
     onStartUnpack: () -> Unit,
     onExtractPartition: (id.xms.payloadpack.ui.viewmodel.PartitionInfo) -> Unit,
+    onRepackPartition: (id.xms.payloadpack.ui.viewmodel.PartitionInfo) -> Unit,
     onOpenExtracted: (id.xms.payloadpack.ui.viewmodel.PartitionInfo) -> Unit,
     onAssembleRom: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Import UnpackState to check state
     val unpackState = uiState.unpackState
+    val isExtracting = uiState.currentPartitionExtraction != null
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
@@ -374,6 +379,16 @@ private fun WorkspaceContent(
                     )
                 }
 
+                // Show Live Log Card when extracting a partition
+                if (isExtracting && uiState.extractionLogs.isNotEmpty()) {
+                    item {
+                        ExtractionLogCard(
+                            partitionName = uiState.currentPartitionExtraction ?: "",
+                            logs = uiState.extractionLogs
+                        )
+                    }
+                }
+
                 // Show Partitions List
                 if (uiState.partitions.isNotEmpty()) {
                     item {
@@ -392,8 +407,24 @@ private fun WorkspaceContent(
                         PartitionCard(
                             partition = partition,
                             onExtract = { onExtractPartition(partition) },
+                            onRepack = { onRepackPartition(partition) },
                             onOpen = { onOpenExtracted(partition) }
                         )
+                    }
+                }
+                
+                // Show logs at bottom if not extracting but logs exist
+                if (!isExtracting && uiState.extractionLogs.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "Recent Activity",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    }
+                    item {
+                        RecentLogCard(logs = uiState.extractionLogs.take(10))
                     }
                 }
             }
@@ -771,6 +802,7 @@ private fun PayloadInfoCard(
 private fun PartitionCard(
     partition: id.xms.payloadpack.ui.viewmodel.PartitionInfo,
     onExtract: () -> Unit,
+    onRepack: () -> Unit,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -840,7 +872,7 @@ private fun PartitionCard(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         OutlinedButton(
-                            onClick = onOpen,
+                            onClick = onRepack,
                             modifier = Modifier.height(32.dp),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                         ) {
@@ -887,4 +919,118 @@ private fun PartitionCard(
     }
 }
 
+/**
+ * Card showing live extraction logs during partition extraction.
+ */
+@Composable
+private fun ExtractionLogCard(
+    partitionName: String,
+    logs: List<String>,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = "Extracting $partitionName.img",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            // Log output area with fixed height and scroll
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+            ) {
+                androidx.compose.foundation.lazy.LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp),
+                    reverseLayout = false
+                ) {
+                    items(logs.reversed()) { log ->
+                        Text(
+                            text = log,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            color = if (log.contains("ERROR") || log.contains("✗")) {
+                                MaterialTheme.colorScheme.error
+                            } else if (log.contains("✓")) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                            },
+                            modifier = Modifier.padding(vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
 
+/**
+ * Card showing recent extraction log entries.
+ */
+@Composable
+private fun RecentLogCard(
+    logs: List<String>,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
+            logs.forEach { log ->
+                Text(
+                    text = log,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    color = if (log.contains("ERROR") || log.contains("✗")) {
+                        MaterialTheme.colorScheme.error
+                    } else if (log.contains("✓")) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(vertical = 2.dp)
+                )
+            }
+        }
+    }
+}

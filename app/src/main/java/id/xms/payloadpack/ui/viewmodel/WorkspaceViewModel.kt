@@ -44,7 +44,11 @@ data class WorkspaceUiState(
     val extractionProgress: Float = 0f,
     val currentFile: String = "",
     val bytesProcessed: Long = 0L,
-    val totalBytes: Long = 0L
+    val totalBytes: Long = 0L,
+    // Live extraction logs (newest first, max 100 lines)
+    val extractionLogs: List<String> = emptyList(),
+    // Current extracting partition name (for partition-level extraction)
+    val currentPartitionExtraction: String? = null
 )
 
 /**
@@ -74,6 +78,7 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
     companion object {
         private const val TAG = "WorkspaceViewModel"
+        private const val MAX_LOG_LINES = 100
     }
 
     private val _uiState = MutableStateFlow(WorkspaceUiState())
@@ -86,6 +91,34 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
             projectName = File(projectPath).name
         )
         checkPayload()
+    }
+
+    /**
+     * Add a log entry to the extraction logs.
+     * Thread-safe, can be called from any coroutine.
+     */
+    private suspend fun addLog(message: String) {
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val logEntry = "[$timestamp] $message"
+        
+        Log.d(TAG, logEntry)
+        
+        withContext(Dispatchers.Main) {
+            val currentLogs = _uiState.value.extractionLogs.toMutableList()
+            currentLogs.add(0, logEntry)  // Add to beginning (newest first)
+            if (currentLogs.size > MAX_LOG_LINES) {
+                currentLogs.removeAt(currentLogs.lastIndex)  // Remove oldest
+            }
+            _uiState.value = _uiState.value.copy(extractionLogs = currentLogs)
+        }
+    }
+
+    /**
+     * Clear extraction logs.
+     */
+    fun clearLogs() {
+        _uiState.value = _uiState.value.copy(extractionLogs = emptyList())
     }
 
     /**
@@ -322,14 +355,21 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
     /**
      * Extract partition image to a folder.
      * Supports EXT4, EROFS, and other Android filesystem formats.
+     * Includes live logging for real-time progress display.
      */
     fun extractPartitionImage(partition: PartitionInfo) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                Log.d(TAG, "Extracting partition: ${partition.name}")
-
+                addLog("Starting extraction: ${partition.name}.img")
+                addLog("Image size: ${partition.sizeFormatted}")
+                
                 // Update state to show extraction in progress
                 updatePartitionState(partition.name, isExtracting = true)
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        currentPartitionExtraction = partition.name
+                    )
+                }
 
                 val projectDir = File(projectPath)
                 val extractedFolder = File(projectDir, "${partition.name}_extracted")
@@ -337,7 +377,9 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                 // Create extraction folder
                 if (!extractedFolder.exists()) {
                     extractedFolder.mkdirs()
-                    Log.d(TAG, "Created folder: ${extractedFolder.absolutePath}")
+                    addLog("Created output folder: ${partition.name}_extracted/")
+                } else {
+                    addLog("Output folder exists, will overwrite: ${partition.name}_extracted/")
                 }
 
                 // Apply permissions using root
@@ -348,45 +390,47 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
                 // Detect filesystem type by reading magic bytes
                 val imgFile = File(partition.path)
+                addLog("Detecting filesystem type...")
                 val fsType = detectFilesystemType(imgFile)
-                Log.d(TAG, "Detected filesystem: $fsType")
+                addLog("Filesystem detected: $fsType")
 
                 // Execute extraction based on filesystem type
                 val success = when (fsType) {
                     FilesystemType.EXT4 -> {
-                        Log.d(TAG, "Extracting EXT4 filesystem...")
+                        addLog("Using EXT4 extraction method...")
                         extractExt4Image(imgFile, extractedFolder)
                     }
                     FilesystemType.EROFS -> {
-                        Log.d(TAG, "Extracting EROFS filesystem...")
+                        addLog("Using EROFS extraction method...")
                         extractErofsImage(imgFile, extractedFolder)
                     }
                     FilesystemType.BOOT -> {
-                        Log.d(TAG, "Unpacking boot image...")
+                        addLog("Using boot image unpack method...")
                         extractBootImage(imgFile, extractedFolder)
                     }
                     FilesystemType.F2FS -> {
-                        Log.d(TAG, "Extracting F2FS filesystem...")
+                        addLog("Using F2FS extraction method...")
                         extractF2fsImage(imgFile, extractedFolder)
                     }
                     FilesystemType.UNKNOWN -> {
-                        // Modern Android partitions are usually EROFS, try it as fallback
-                        Log.w(TAG, "Unknown filesystem type, trying EROFS extraction as fallback...")
+                        addLog("Unknown filesystem, trying fallbacks...")
                         logFileMagicBytes(imgFile)
                         
                         // Try EROFS first (most common for modern ROMs)
+                        addLog("Attempting EROFS extraction...")
                         val erofsSuccess = extractErofsImage(imgFile, extractedFolder)
                         if (erofsSuccess) {
-                            Log.d(TAG, "EROFS fallback extraction succeeded!")
+                            addLog("EROFS extraction succeeded!")
                             true
                         } else {
                             // Try EXT4 as second fallback
-                            Log.d(TAG, "EROFS failed, trying EXT4...")
+                            addLog("EROFS failed, trying EXT4...")
                             val ext4Success = extractExt4Image(imgFile, extractedFolder)
                             if (ext4Success) {
-                                Log.d(TAG, "EXT4 fallback extraction succeeded!")
+                                addLog("EXT4 extraction succeeded!")
                                 true
                             } else {
+                                addLog("ERROR: All extraction methods failed!")
                                 setExtractionError("Could not extract ${partition.name}. Tried EROFS and EXT4.")
                                 false
                             }
@@ -396,19 +440,31 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
 
                 // Update extraction state
                 updatePartitionState(partition.name, isExtracting = false)
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        currentPartitionExtraction = null
+                    )
+                }
 
                 // Refresh partition list
                 loadExtractedPartitions()
 
-                Log.d(TAG, "Extraction complete: ${partition.name} (success: $success, fsType: $fsType)")
+                if (success) {
+                    addLog("✓ Extraction complete: ${partition.name}")
+                    addLog("Files extracted to: ${partition.name}_extracted/")
+                } else {
+                    addLog("✗ Extraction failed: ${partition.name}")
+                }
 
             } catch (e: Exception) {
+                addLog("ERROR: ${e.message}")
                 Log.e(TAG, "Extraction failed: ${e.message}", e)
                 updatePartitionState(partition.name, isExtracting = false)
 
                 withContext(Dispatchers.Main) {
                     _uiState.value = _uiState.value.copy(
-                        errorMessage = "Extraction failed: ${e.message}"
+                        errorMessage = "Extraction failed: ${e.message}",
+                        currentPartitionExtraction = null
                     )
                 }
             }
@@ -601,94 +657,77 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
      * Preserves original permissions to fs_config before applying chmod 777.
      */
     private suspend fun extractErofsImage(imgFile: File, outputFolder: File): Boolean {
-        val binPath = id.xms.payloadpack.core.BinaryManager.getBinPath()
-        if (binPath == null) {
-            Log.e(TAG, "BinaryManager not initialized")
-            return false
-        }
-        
-        val partitionName = imgFile.nameWithoutExtension
-        
-        // Method 1: Try extract.erofs (preferred for extraction)
-        if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("extract.erofs")) {
-            Log.d(TAG, "Trying extract.erofs...")
-            
-            // Use root shell for files in /data
-            val result = Shell.cmd(
-                "'$binPath/extract.erofs' -i '${imgFile.absolutePath}' -x -T8 '${outputFolder.absolutePath}'"
-            ).exec()
-            
-            if (result.isSuccess) {
-                // Save original permissions BEFORE chmod 777
-                Log.d(TAG, "Saving original permissions...")
-                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
-                when (saveResult) {
-                    is PermissionManager.SaveResult.Success -> {
-                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
-                    }
-                    is PermissionManager.SaveResult.Error -> {
-                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
-                    }
-                }
-                
-                // Now apply chmod 777 for UI access
-                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
-                Log.d(TAG, "extract.erofs successful")
-                result.out.forEach { Log.d(TAG, "  $it") }
-                return true
-            } else {
-                Log.w(TAG, "extract.erofs failed: ${result.err}")
+        return withContext(Dispatchers.IO) {
+            val binPath = id.xms.payloadpack.core.BinaryManager.getBinPath()
+            if (binPath == null) {
+                addLog("Error: BinaryManager not initialized")
+                return@withContext false
             }
-        }
-        
-        // Method 2: Try fsck.erofs --extract
-        if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("fsck.erofs")) {
-            Log.d(TAG, "Trying fsck.erofs --extract...")
             
-            // Use root shell for files in /data
-            val result = Shell.cmd(
-                "'$binPath/fsck.erofs' --extract='${outputFolder.absolutePath}' '${imgFile.absolutePath}'"
-            ).exec()
+            val partitionName = imgFile.nameWithoutExtension
             
-            if (result.isSuccess) {
-                // Save original permissions BEFORE chmod 777
-                Log.d(TAG, "Saving original permissions...")
-                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
-                when (saveResult) {
-                    is PermissionManager.SaveResult.Success -> {
-                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
-                    }
-                    is PermissionManager.SaveResult.Error -> {
-                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
-                    }
-                }
+            // Method 1: Try extract.erofs (preferred for extraction)
+            if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("extract.erofs")) {
+                addLog("Running extract.erofs...")
                 
-                // Now apply chmod 777 for UI access
-                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
-                Log.d(TAG, "fsck.erofs extraction successful")
-                result.out.forEach { Log.d(TAG, "  $it") }
-                return true
-            } else {
-                Log.w(TAG, "fsck.erofs failed:")
-                result.err.forEach { Log.e(TAG, "  $it") }
-                result.out.forEach { Log.e(TAG, "  $it") }
+                val result = Shell.cmd(
+                    "'$binPath/extract.erofs' -i '${imgFile.absolutePath}' -x -T8 '${outputFolder.absolutePath}'"
+                ).exec()
+                
+                if (result.isSuccess) {
+                    addLog("Saving permissions...")
+                    val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                    when (saveResult) {
+                        is PermissionManager.SaveResult.Success -> {
+                            addLog("Permissions saved: ${saveResult.fileCount} files")
+                        }
+                        is PermissionManager.SaveResult.Error -> {
+                            addLog("Warning: ${saveResult.message}")
+                        }
+                    }
+                    
+                    addLog("Applying UI permissions...")
+                    Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
+                    addLog("EROFS extraction successful")
+                    return@withContext true
+                } else {
+                    addLog("extract.erofs failed, trying fsck.erofs...")
+                }
             }
-        }
-        
-        // Method 3: Try dump.erofs to at least verify it's a valid EROFS image
-        if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("dump.erofs")) {
-            Log.d(TAG, "Checking with dump.erofs...")
-            val dumpResult = Shell.cmd(
-                "'$binPath/dump.erofs' '${imgFile.absolutePath}'"
-            ).exec()
             
-            Log.d(TAG, "dump.erofs output:")
-            dumpResult.out.forEach { Log.d(TAG, "  $it") }
-            dumpResult.err.forEach { Log.e(TAG, "  $it") }
+            // Method 2: Try fsck.erofs --extract
+            if (id.xms.payloadpack.core.BinaryManager.isBinaryAvailable("fsck.erofs")) {
+                addLog("Running fsck.erofs --extract...")
+                
+                val result = Shell.cmd(
+                    "'$binPath/fsck.erofs' --extract='${outputFolder.absolutePath}' '${imgFile.absolutePath}'"
+                ).exec()
+                
+                if (result.isSuccess) {
+                    addLog("Saving permissions...")
+                    val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                    when (saveResult) {
+                        is PermissionManager.SaveResult.Success -> {
+                            addLog("Permissions saved: ${saveResult.fileCount} files")
+                        }
+                        is PermissionManager.SaveResult.Error -> {
+                            addLog("Warning: ${saveResult.message}")
+                        }
+                    }
+                    
+                    addLog("Applying UI permissions...")
+                    Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
+                    addLog("EROFS extraction successful")
+                    return@withContext true
+                } else {
+                    addLog("fsck.erofs failed")
+                    result.err.firstOrNull()?.let { addLog("  $it") }
+                }
+            }
+            
+            addLog("All EROFS extraction methods failed")
+            false
         }
-        
-        Log.e(TAG, "All EROFS extraction methods failed")
-        return false
     }
     
     /**
@@ -707,39 +746,45 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
      * Preserves original permissions to fs_config before applying chmod 777.
      */
     private suspend fun extractExt4Image(imgFile: File, outputFolder: File): Boolean {
-        return try {
-            val success = id.xms.payloadpack.core.BinaryManager.extractExt4(
-                imgFile.absolutePath,
-                outputFolder.absolutePath
-            )
-
-            if (success) {
-                val partitionName = imgFile.nameWithoutExtension
+        return withContext(Dispatchers.IO) {
+            try {
+                addLog("Running EXT4 extraction...")
                 
-                // Save original permissions BEFORE chmod 777
-                Log.d(TAG, "Saving original permissions for $partitionName...")
-                val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
-                when (saveResult) {
-                    is PermissionManager.SaveResult.Success -> {
-                        Log.d(TAG, "Permissions saved: ${saveResult.fileCount} files")
+                val success = id.xms.payloadpack.core.BinaryManager.extractExt4(
+                    imgFile.absolutePath,
+                    outputFolder.absolutePath
+                )
+
+                if (success) {
+                    val partitionName = imgFile.nameWithoutExtension
+                    
+                    // Save original permissions BEFORE chmod 777
+                    addLog("Saving permissions...")
+                    val saveResult = PermissionManager.savePermissions(outputFolder, partitionName)
+                    when (saveResult) {
+                        is PermissionManager.SaveResult.Success -> {
+                            addLog("Permissions saved: ${saveResult.fileCount} files")
+                        }
+                        is PermissionManager.SaveResult.Error -> {
+                            addLog("Warning: ${saveResult.message}")
+                        }
                     }
-                    is PermissionManager.SaveResult.Error -> {
-                        Log.w(TAG, "Failed to save permissions: ${saveResult.message}")
-                    }
+                    
+                    // Now apply chmod 777 for UI access
+                    addLog("Applying UI permissions...")
+                    Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
+                    id.xms.payloadpack.core.BinaryManager.cleanup(outputFolder.absolutePath)
+                    addLog("EXT4 extraction successful")
+                } else {
+                    addLog("EXT4 extraction failed")
                 }
-                
-                // Now apply chmod 777 for UI access
-                Shell.cmd("chmod -R 777 '${outputFolder.absolutePath}'").exec()
-                id.xms.payloadpack.core.BinaryManager.cleanup(outputFolder.absolutePath)
-                Log.d(TAG, "EXT4 extraction successful")
-            } else {
-                Log.e(TAG, "EXT4 extraction failed")
-            }
 
-            success
-        } catch (e: Exception) {
-            Log.e(TAG, "Error extracting EXT4: ${e.message}", e)
-            false
+                success
+            } catch (e: Exception) {
+                addLog("EXT4 error: ${e.message}")
+                Log.e(TAG, "Error extracting EXT4: ${e.message}", e)
+                false
+            }
         }
     }
 
@@ -977,6 +1022,386 @@ class WorkspaceViewModel(private val projectPath: String) : ViewModel() {
                 
             } catch (e: Exception) {
                 Log.e(TAG, "Error restoring all permissions: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Repack a partition from extracted folder back to .img file.
+     * This will restore original permissions and use appropriate tool based on filesystem.
+     */
+    fun repackPartitionImage(partition: PartitionInfo) {
+        if (!partition.isExtracted || partition.extractedPath == null) {
+            Log.w(TAG, "Cannot repack: partition not extracted")
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                addLog("Starting repack: ${partition.name}")
+                
+                // Update state
+                updatePartitionState(partition.name, isExtracting = true)
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        currentPartitionExtraction = partition.name
+                    )
+                }
+
+                val extractedFolder = File(partition.extractedPath)
+                val projectDir = File(projectPath)
+                val outputImg = File(projectDir, "${partition.name}_repacked.img")
+
+                // Step 1: Restore original permissions if config exists
+                if (partition.hasPermissionConfig) {
+                    addLog("Restoring original permissions...")
+                    val restoreResult = PermissionManager.restorePermissions(extractedFolder)
+                    when (restoreResult) {
+                        is PermissionManager.RestoreResult.Success -> {
+                            addLog("Restored ${restoreResult.restoredCount} permissions")
+                        }
+                        is PermissionManager.RestoreResult.Error -> {
+                            addLog("Warning: Failed to restore permissions: ${restoreResult.message}")
+                        }
+                    }
+                } else {
+                    addLog("Warning: No permission config found, repacking with current permissions")
+                }
+
+                // Step 2: Detect original filesystem type from the source image
+                val originalImg = File(partition.path)
+                val fsType = detectFilesystemType(originalImg)
+                addLog("Original filesystem type: $fsType")
+
+                // Step 3: Repack based on filesystem type
+                val success = when (fsType) {
+                    FilesystemType.EROFS -> {
+                        addLog("Repacking as EROFS...")
+                        repackAsErofs(extractedFolder, outputImg)
+                    }
+                    FilesystemType.EXT4 -> {
+                        addLog("Repacking as EXT4...")
+                        repackAsExt4(extractedFolder, outputImg, originalImg.length())
+                    }
+                    FilesystemType.BOOT -> {
+                        addLog("Repacking boot image...")
+                        repackBootImage(extractedFolder, outputImg)
+                    }
+                    else -> {
+                        addLog("Using EXT4 as default repack format...")
+                        repackAsExt4(extractedFolder, outputImg, originalImg.length())
+                    }
+                }
+
+                // Update state
+                updatePartitionState(partition.name, isExtracting = false)
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        currentPartitionExtraction = null
+                    )
+                }
+
+                if (success) {
+                    addLog("✓ Repack complete: ${partition.name}")
+                    addLog("Output: ${outputImg.name} (${RootSizeCalculator.formatSize(outputImg.length())})")
+                } else {
+                    addLog("✗ Repack failed: ${partition.name}")
+                }
+
+                // Refresh partition list
+                loadExtractedPartitions()
+
+            } catch (e: Exception) {
+                addLog("ERROR: ${e.message}")
+                Log.e(TAG, "Repack failed: ${e.message}", e)
+                updatePartitionState(partition.name, isExtracting = false)
+
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Repack failed: ${e.message}",
+                        currentPartitionExtraction = null
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Repack folder as EROFS image using mkfs.erofs
+     */
+    private suspend fun repackAsErofs(sourceFolder: File, outputImg: File): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val toolsDir = File("/data/local/PayloadPack")
+                val mkfsErofs = File(toolsDir, "mkfs.erofs")
+
+                if (!mkfsErofs.exists()) {
+                    addLog("mkfs.erofs not found, trying to use system tool...")
+                    // Try system mkfs.erofs
+                    val result = Shell.cmd(
+                        "mkfs.erofs -zlz4hc '${outputImg.absolutePath}' '${sourceFolder.absolutePath}'"
+                    ).exec()
+                    return@withContext result.isSuccess
+                }
+
+                addLog("Using PayloadPack mkfs.erofs...")
+                val result = Shell.cmd(
+                    "'${mkfsErofs.absolutePath}' -zlz4hc '${outputImg.absolutePath}' '${sourceFolder.absolutePath}'"
+                ).exec()
+
+                if (!result.isSuccess) {
+                    result.err.forEach { addLog("  $it") }
+                }
+
+                result.isSuccess
+            } catch (e: Exception) {
+                addLog("EROFS repack error: ${e.message}")
+                false
+            }
+        }
+    }
+
+    /**
+     * Repack folder as EXT4 image using make_ext4fs or tar
+     */
+    private suspend fun repackAsExt4(sourceFolder: File, outputImg: File, targetSize: Long): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val binPath = id.xms.payloadpack.core.BinaryManager.getBinPath()
+                
+                // Calculate size with 20% overhead to be safe
+                val imgSize = (targetSize * 1.2).toLong()
+                val imgSizeMB = imgSize / (1024 * 1024)
+                val partitionName = sourceFolder.name.removeSuffix("_extracted")
+                
+                addLog("Target image size: ${imgSizeMB}MB")
+
+                // Method 1: Try make_ext4fs from BinaryManager (best method)
+                if (binPath != null) {
+                    val makeExt4fs = File(binPath, "make_ext4fs")
+                    if (makeExt4fs.exists()) {
+                        addLog("Using make_ext4fs...")
+                        val result = Shell.cmd(
+                            "'${makeExt4fs.absolutePath}' -l ${imgSize} -a /$partitionName '${outputImg.absolutePath}' '${sourceFolder.absolutePath}'"
+                        ).exec()
+
+                        if (result.isSuccess) {
+                            addLog("make_ext4fs successful")
+                            return@withContext true
+                        } else {
+                            result.err.forEach { addLog("  $it") }
+                            addLog("make_ext4fs failed, trying alternatives...")
+                        }
+                    }
+                }
+
+                // Method 2: Use mke2fs + mount approach
+                // Android kernel restricts loop mounts from /data, so we need to work in /sdcard
+                val tmpDir = "/sdcard/PayloadPack_repack"
+                val tmpImgPath = "$tmpDir/${partitionName}_repack.img"
+                
+                addLog("Creating image in external storage (loop mount workaround)...")
+                Shell.cmd("mkdir -p '$tmpDir'").exec()
+                
+                // Create sparse image in /sdcard
+                val ddResult = Shell.cmd(
+                    "dd if=/dev/zero of='$tmpImgPath' bs=1M count=0 seek=$imgSizeMB 2>/dev/null"
+                ).exec()
+                
+                if (!ddResult.isSuccess) {
+                    // Fallback: try truncate
+                    val truncateResult = Shell.cmd(
+                        "truncate -s ${imgSize} '$tmpImgPath'"
+                    ).exec()
+                    
+                    if (!truncateResult.isSuccess) {
+                        addLog("Failed to create image file")
+                        return@withContext false
+                    }
+                }
+                
+                // Format with mke2fs
+                val mke2fsPaths = listOf(
+                    "/system/bin/mke2fs",
+                    "/vendor/bin/mke2fs", 
+                    "mke2fs"
+                )
+                
+                var formatSuccess = false
+                for (mke2fsPath in mke2fsPaths) {
+                    addLog("Trying: $mke2fsPath")
+                    val mkfsResult = Shell.cmd(
+                        "$mke2fsPath -t ext4 -b 4096 -O ^metadata_csum '$tmpImgPath' 2>&1"
+                    ).exec()
+                    
+                    if (mkfsResult.isSuccess) {
+                        formatSuccess = true
+                        addLog("Format successful")
+                        break
+                    }
+                }
+                
+                if (!formatSuccess) {
+                    addLog("All mke2fs attempts failed")
+                    Shell.cmd("rm -f '$tmpImgPath'").exec()
+                    
+                    // Fallback to tar archive
+                    addLog("Creating tar archive as fallback...")
+                    val tarOutput = File(outputImg.parent, "${partitionName}_repacked.tar.gz")
+                    val tarResult = Shell.cmd(
+                        "cd '${sourceFolder.absolutePath}' && tar -czf '${tarOutput.absolutePath}' ."
+                    ).exec()
+                    
+                    if (tarResult.isSuccess) {
+                        addLog("Created tar archive: ${tarOutput.name}")
+                        return@withContext true
+                    }
+                    
+                    return@withContext false
+                }
+                
+                // Mount and copy files - now from /sdcard which allows loop mount
+                val mountPoint = "/mnt/repack_ext4_tmp"
+                addLog("Mounting image...")
+                
+                Shell.cmd("mkdir -p '$mountPoint'").exec()
+                Shell.cmd("umount '$mountPoint' 2>/dev/null").exec()
+                
+                // Try multiple mount methods
+                var mountSuccess = false
+                
+                // Method A: Direct loop mount
+                val mountResult = Shell.cmd(
+                    "mount -t ext4 -o loop '$tmpImgPath' '$mountPoint'"
+                ).exec()
+                
+                if (mountResult.isSuccess) {
+                    mountSuccess = true
+                } else {
+                    addLog("Direct mount failed, trying losetup...")
+                    
+                    // Method B: Manual losetup
+                    val findLoopResult = Shell.cmd("losetup -f 2>/dev/null || echo /dev/block/loop7").exec()
+                    val loopDevice = if (findLoopResult.isSuccess && findLoopResult.out.isNotEmpty()) {
+                        findLoopResult.out.first().trim()
+                    } else {
+                        "/dev/block/loop7"
+                    }
+                    
+                    Shell.cmd("losetup -d '$loopDevice' 2>/dev/null").exec()
+                    val losetupResult = Shell.cmd("losetup '$loopDevice' '$tmpImgPath'").exec()
+                    
+                    if (losetupResult.isSuccess) {
+                        val mountResult2 = Shell.cmd(
+                            "mount -t ext4 '$loopDevice' '$mountPoint'"
+                        ).exec()
+                        
+                        if (mountResult2.isSuccess) {
+                            mountSuccess = true
+                        } else {
+                            Shell.cmd("losetup -d '$loopDevice'").exec()
+                        }
+                    }
+                }
+                
+                if (!mountSuccess) {
+                    addLog("Mount failed - kernel may not support loop mounts")
+                    Shell.cmd("rm -f '$tmpImgPath'").exec()
+                    
+                    // Fallback to tar
+                    addLog("Creating tar archive as fallback...")
+                    val tarOutput = File(outputImg.parent, "${partitionName}_repacked.tar.gz")
+                    val tarResult = Shell.cmd(
+                        "cd '${sourceFolder.absolutePath}' && tar -czf '${tarOutput.absolutePath}' ."
+                    ).exec()
+                    
+                    if (tarResult.isSuccess) {
+                        addLog("Created tar archive: ${tarOutput.name}")
+                        return@withContext true
+                    }
+                    
+                    return@withContext false
+                }
+                
+                addLog("Mount successful, copying files...")
+                
+                // Copy files preserving permissions
+                val copyResult = Shell.cmd(
+                    "cp -rpf '${sourceFolder.absolutePath}'/. '$mountPoint/' 2>&1"
+                ).exec()
+                
+                // Sync and unmount
+                Shell.cmd("sync").exec()
+                Shell.cmd("umount '$mountPoint'").exec()
+                
+                if (!copyResult.isSuccess) {
+                    addLog("Copy failed: ${copyResult.err.firstOrNull()}")
+                    Shell.cmd("rm -f '$tmpImgPath'").exec()
+                    return@withContext false
+                }
+                
+                addLog("Files copied successfully")
+                
+                // Move image back to project folder
+                addLog("Moving image to project folder...")
+                val moveResult = Shell.cmd(
+                    "mv '$tmpImgPath' '${outputImg.absolutePath}'"
+                ).exec()
+                
+                if (!moveResult.isSuccess) {
+                    // Try copy instead
+                    val cpResult = Shell.cmd(
+                        "cp '$tmpImgPath' '${outputImg.absolutePath}' && rm -f '$tmpImgPath'"
+                    ).exec()
+                    
+                    if (!cpResult.isSuccess) {
+                        addLog("Failed to move image to project folder")
+                        // Image is still in /sdcard
+                        addLog("Image available at: $tmpImgPath")
+                        return@withContext true
+                    }
+                }
+                
+                // Cleanup temp dir
+                Shell.cmd("rmdir '$tmpDir' 2>/dev/null").exec()
+                
+                addLog("EXT4 repack complete")
+                true
+                
+            } catch (e: Exception) {
+                addLog("EXT4 repack error: ${e.message}")
+                false
+            }
+        }
+    }
+
+    /**
+     * Repack boot image using magiskboot
+     */
+    private suspend fun repackBootImage(sourceFolder: File, outputImg: File): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val toolsDir = File("/data/local/PayloadPack")
+                val magiskboot = File(toolsDir, "magiskboot")
+
+                if (!magiskboot.exists()) {
+                    addLog("magiskboot not found")
+                    return@withContext false
+                }
+
+                // Change to source folder and repack
+                val result = Shell.cmd(
+                    "cd '${sourceFolder.absolutePath}' && '${magiskboot.absolutePath}' repack '${File(sourceFolder.parent, "${sourceFolder.name.removeSuffix("_extracted")}.img").absolutePath}' '${outputImg.absolutePath}'"
+                ).exec()
+
+                if (!result.isSuccess) {
+                    result.err.forEach { addLog("  $it") }
+                }
+
+                result.isSuccess
+            } catch (e: Exception) {
+                addLog("Boot repack error: ${e.message}")
+                false
             }
         }
     }
